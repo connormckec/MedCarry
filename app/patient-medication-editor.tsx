@@ -3,7 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import { Camera, Check, ChevronRight, LoaderCircle } from "lucide-react";
 import { formulations, frequencies, units, useSummary, validateFields, type MedicationFields } from "@/lib/medication";
 
-type Props={fields:MedicationFields;sourceIds:string[];notices:string[];existing:boolean;quick:boolean;busy:boolean;error:string;onField:<K extends keyof MedicationFields>(key:K,value:MedicationFields[K])=>void;onForm:(form:MedicationFields["formulation"])=>void;onSave:(confirm:boolean)=>void;onRemove:()=>void;onCamera:()=>void;onAdvanced?:()=>void};
+type Props={
+  fields:MedicationFields;sourceIds:string[];notices:string[];existing:boolean;quick:boolean;busy:boolean;error:string;saveState?:""|"saving"|"saved"|"error";
+  onField:<K extends keyof MedicationFields>(key:K,value:MedicationFields[K])=>void;onForm:(form:MedicationFields["formulation"])=>void;onSave:(confirm:boolean)=>void;
+  onNoLongerTake:()=>void;onAddedByMistake:()=>void;onCamera:()=>void;onAdvanced?:()=>void;
+};
 const formNames:Record<MedicationFields["formulation"],string>={tablet:"Tablet",capsule:"Capsule",liquid:"Liquid",inhaler:"Inhaler",injection:"Injection",topical:"Cream / ointment",patch:"Patch",drops:"Drops",powder:"Powder",other:"Other / not sure"};
 
 export default function PatientMedicationEditor(p:Props){
@@ -29,7 +33,7 @@ export default function PatientMedicationEditor(p:Props){
   </details>;
   return <>
     <div className="editor-content patient-editor">
-      <p className="patient-step">{step} of 3</p>
+      <p className="patient-step">{step} of 3{p.saveState==="saving"?" · Saving…":p.saveState==="saved"?" · Saved":""}</p>
       <h3 ref={heading} tabIndex={-1}>{step===1?"What is the name?":step===2?"How do you take it?":"Does this look right?"}</h3>
       {step===1?<>
         <label className="field">Medicine or supplement name<input autoComplete="off" value={f.productName} maxLength={180} disabled={p.busy} onChange={e=>p.onField("productName",e.target.value)}/></label>
@@ -39,7 +43,7 @@ export default function PatientMedicationEditor(p:Props){
         {evidence}
       </>:step===2?<>
         <p className="patient-medicine-name">{f.productName}</p>
-        <label className="field">Do you take it now?<select value={f.status} disabled={p.busy} onChange={e=>p.onField("status",e.target.value as MedicationFields["status"])}><option value="taking">Yes</option><option value="stopped">No, I stopped</option><option value="held">It is on hold</option><option value="unsure">I'm not sure</option></select></label>
+        <label className="field">Do you take it now?<select value={f.status} disabled={p.busy} onChange={e=>p.onField("status",e.target.value as MedicationFields["status"])}><option value="taking">Yes</option><option value="stopped">No, I no longer take it</option><option value="held">It is on hold</option><option value="unsure">I'm not sure</option></select></label>
         {f.status==="taking"&&<>
           <label className="checkbox-row"><input type="checkbox" checked={f.actualUseUnknown} disabled={p.busy} onChange={e=>p.onField("actualUseUnknown",e.target.checked)}/><span>I'm not sure how much or how often</span></label>
           {!f.actualUseUnknown&&<>
@@ -63,10 +67,18 @@ export default function PatientMedicationEditor(p:Props){
         {evidence}
         <p className="patient-confirm-copy">Confirm the details, including anything marked unsure.</p>
       </>}
-      {f.sourceDocument&&<details className="patient-extra"><summary>From an older record</summary><p className="patient-review-note">{f.sourceDocument} · {f.sourceDate||"Date unknown"}</p><blockquote>{f.sourceText}</blockquote><p className="patient-small">Check what you take now.</p></details>}
+      {f.sourceDocument&&<details className="patient-extra"><summary>From an older record</summary><p className="patient-review-note">{f.sourceDocument} · {f.sourceDate||"Date unknown"}</p><blockquote>{f.sourceText}</blockquote><p className="patient-small">Check what you take now. Reporting a change does not stop a prescription.</p></details>}
       {p.notices.length>0&&<details className="patient-extra"><summary>Label reader notes</summary>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</details>}
       {(stepError||p.error)&&<div className="patient-error" role="alert">{stepError||p.error}</div>}
-      <details className="patient-extra patient-edit-options"><summary>More options</summary><button className="patient-text" disabled={p.busy} onClick={()=>p.onSave(false)}>Save for later</button>{p.onAdvanced&&<button className="patient-text" disabled={p.busy} onClick={p.onAdvanced}>Detailed editor</button>}{p.existing&&<button className="patient-text danger" disabled={p.busy} onClick={p.onRemove}>Remove this medication</button>}</details>
+      <details className="patient-extra patient-edit-options"><summary>Change this medication</summary>
+        <button className="patient-text" disabled={p.busy} onClick={()=>p.onSave(false)}>Save for later</button>
+        {p.onAdvanced&&<button className="patient-text" disabled={p.busy} onClick={p.onAdvanced}>Detailed editor</button>}
+        {p.existing&&<>
+          <button className="patient-text" disabled={p.busy} onClick={p.onNoLongerTake}>I no longer take this</button>
+          <button className="patient-text" disabled={p.busy} onClick={p.onAddedByMistake}>I added this by mistake</button>
+          <p className="patient-small">These choices keep a record for the clinic. They do not discontinue a prescription.</p>
+        </>}
+      </details>
     </div>
     <div className="dialog-bottom patient-editor-footer">
       {step>1&&<button className="button secondary" disabled={p.busy} onClick={()=>go(step-1)}>Back</button>}

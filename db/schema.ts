@@ -18,8 +18,10 @@ export const medications = sqliteTable("medications", {
   data: text("data").notNull(), sourceIds: text("source_ids").notNull(),
   revision: integer("revision").notNull().default(1),
   confirmedRevision: integer("confirmed_revision"), confirmedAt: text("confirmed_at"),
+  /** active | suppressed — mistake suppressions keep the row for history/Undo. */
+  listState: text("list_state").notNull().default("active"),
   createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull(),
-}, t => [index("medications_owner").on(t.ownerId, t.profileId)]);
+}, t => [index("medications_owner").on(t.ownerId, t.profileId), index("medications_list_state").on(t.ownerId, t.profileId, t.listState)]);
 
 export const snapshots = sqliteTable("snapshots", {
   id: text("id").primaryKey(), ownerId: text("owner_id").notNull(),
@@ -136,3 +138,43 @@ export const profilePatientLinks = sqliteTable("profile_patient_links", {
   linkedBy: text("linked_by").notNull(),
   createdAt: text("created_at").notNull(),
 }, t => [uniqueIndex("profile_patient_link").on(t.profileId)]);
+
+/**
+ * Retained patient-reported changes. Never silently discontinue a prescription —
+ * "no_longer_take" keeps the row; "added_by_mistake" suppresses with Undo.
+ */
+export const medicationChangeEvents = sqliteTable("medication_change_events", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  profileId: text("profile_id").notNull().references(() => profiles.id),
+  medicationId: text("medication_id").notNull().references(() => medications.id),
+  actorPrincipalId: text("actor_principal_id").notNull(),
+  /** no_longer_take | added_by_mistake | undo_no_longer_take | undo_added_by_mistake */
+  reason: text("reason").notNull(),
+  priorData: text("prior_data").notNull(),
+  priorSourceIds: text("prior_source_ids").notNull(),
+  priorRevision: integer("prior_revision").notNull(),
+  priorConfirmedRevision: integer("prior_confirmed_revision"),
+  priorConfirmedAt: text("prior_confirmed_at"),
+  priorListState: text("prior_list_state").notNull(),
+  undoneAt: text("undone_at"),
+  createdAt: text("created_at").notNull(),
+}, t => [
+  index("change_events_profile").on(t.ownerId, t.profileId),
+  index("change_events_medication").on(t.medicationId),
+]);
+
+/** In-progress editor drafts for authenticated resume (not clinic delivery). */
+export const editorDrafts = sqliteTable("editor_drafts", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  profileId: text("profile_id").notNull().references(() => profiles.id),
+  principalId: text("principal_id").notNull(),
+  /** Empty string for a new medication draft. */
+  medicationId: text("medication_id").notNull(),
+  draftJson: text("draft_json").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, t => [
+  uniqueIndex("editor_draft_unique").on(t.ownerId, t.profileId, t.principalId, t.medicationId),
+  index("editor_drafts_principal").on(t.principalId, t.profileId),
+]);

@@ -11,11 +11,12 @@ import {
   listAccessibleProfiles,
   type ProfileAccess,
 } from "@/lib/clinic-authz";
+import { MedicationChangeError, parseChangeReason, parseEditorDraft } from "@/lib/medication-changes";
 import { SYNTHETIC } from "@/lib/synthetic-clinic";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
-type Row = { id: string; owner_id: string; profile_id: string; data: string; source_ids: string; revision: number; confirmed_revision: number | null; confirmed_at: string | null; created_at: string; updated_at: string };
+type Row = { id: string; owner_id: string; profile_id: string; data: string; source_ids: string; revision: number; confirmed_revision: number | null; confirmed_at: string | null; list_state: string; created_at: string; updated_at: string };
 class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 const baseHeaders = { "Cache-Control":"private, no-store", "X-Content-Type-Options":"nosniff", "Referrer-Policy":"no-referrer" };
 function json(data: unknown, status=200) { return Response.json(data, {status, headers:baseHeaders}); }
@@ -93,8 +94,54 @@ async function handle(req:Request,ctx:Context){
       const pid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)").bind(pid,principal,name,now),event(principal,pid,pid,"profile_created")]);return json({profile:{id:pid,name,created_at:now}},201);
     }
     if(req.method==="GET"&&route==="list"){
-      const access=await requireProfile(principal,url.searchParams.get("profile"));const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 100").bind(access.dataOwnerId,access.profile.id).all<Row>();
-      const cards=await db().prepare("SELECT id,recipient,patient_name,created_at FROM snapshots WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 15").bind(access.dataOwnerId,access.profile.id).all();return json({medications:rows.results.map(med),cards:cards.results,access:{actor:access.actor,practiceId:access.practiceId,patientId:access.patientId}});
+      const access=await requireProfile(principal,url.searchParams.get("profile"));
+      const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' ORDER BY created_at DESC LIMIT 100").bind(access.dataOwnerId,access.profile.id).all<Row>();
+      const cards=await db().prepare("SELECT id,recipient,patient_name,created_at FROM snapshots WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 15").bind(access.dataOwnerId,access.profile.id).all();
+      const draftMedId=url.searchParams.get("draftMedication")||"";
+      const draft=await db().prepare("SELECT id,medication_id,draft_json,updated_at FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?")
+        .bind(access.dataOwnerId,access.profile.id,principal,draftMedId).first<{id:string;medication_id:string;draft_json:string;updated_at:string}>();
+      const openDrafts=await db().prepare("SELECT id,medication_id,draft_json,updated_at FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? ORDER BY updated_at DESC LIMIT 5")
+        .bind(access.dataOwnerId,access.profile.id,principal).all<{id:string;medication_id:string;draft_json:string;updated_at:string}>();
+      const changes=await db().prepare("SELECT id,medication_id,actor_principal_id,reason,prior_revision,prior_list_state,undone_at,created_at FROM medication_change_events WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 40")
+        .bind(access.dataOwnerId,access.profile.id).all();
+      const suppressed=access.canManageStaffTools
+        ? (await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='suppressed' ORDER BY updated_at DESC LIMIT 40").bind(access.dataOwnerId,access.profile.id).all<Row>()).results.map(med)
+        : [];
+      return json({
+        medications:rows.results.map(med),
+        cards:cards.results,
+        changeEvents:changes.results,
+        suppressedMedications:suppressed,
+        editorDraft:draft?{id:draft.id,medicationId:draft.medication_id||null,updatedAt:draft.updated_at,draft:JSON.parse(draft.draft_json)}:null,
+        openDrafts:openDrafts.results.map(d=>({id:d.id,medicationId:d.medication_id||null,updatedAt:d.updated_at,draft:JSON.parse(d.draft_json)})),
+        access:{actor:access.actor,practiceId:access.practiceId,patientId:access.patientId},
+      });
+    }
+    if(req.method==="PUT"&&route==="draft"){
+      const b=await body(req),access=await requireProfile(principal,b.profileId);
+      const medicationId=typeof b.medicationId==="string"&&b.medicationId?id(b.medicationId):"";
+      if(medicationId){const row=await db().prepare("SELECT id,owner_id,list_state FROM medications WHERE id=?").bind(medicationId).first<{id:string;owner_id:string;list_state:string}>();if(!row||row.owner_id!==access.dataOwnerId||row.list_state!=="active")throw new ApiError(404,"This medication was not found.");}
+      const payload=parseEditorDraft(b.draft);validateFields(payload.fields,false);
+      for(const sid of payload.sourceIds){const found=await db().prepare("SELECT id FROM uploads WHERE id=? AND owner_id=? AND profile_id=?").bind(sid,access.dataOwnerId,access.profile.id).first();if(!found)throw new ApiError(400,"A source photo does not belong to this list.");}
+      const now=new Date().toISOString();
+      const existing=await db().prepare("SELECT id FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?")
+        .bind(access.dataOwnerId,access.profile.id,principal,medicationId).first<{id:string}>();
+      const draftBody=JSON.stringify(payload);
+      if(existing){
+        await db().prepare("UPDATE editor_drafts SET draft_json=?,updated_at=? WHERE id=?").bind(draftBody,now,existing.id).run();
+        return json({id:existing.id,medicationId:medicationId||null,updatedAt:now,saved:true});
+      }
+      const did=crypto.randomUUID();
+      await db().prepare("INSERT INTO editor_drafts (id,owner_id,profile_id,principal_id,medication_id,draft_json,updated_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(did,access.dataOwnerId,access.profile.id,principal,medicationId,draftBody,now).run();
+      return json({id:did,medicationId:medicationId||null,updatedAt:now,saved:true},201);
+    }
+    if(req.method==="DELETE"&&route==="draft"){
+      const b=await body(req),access=await requireProfile(principal,b.profileId);
+      const medicationId=typeof b.medicationId==="string"&&b.medicationId?id(b.medicationId):"";
+      await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?")
+        .bind(access.dataOwnerId,access.profile.id,principal,medicationId).run();
+      return json({deleted:true});
     }
     if(req.method==="POST"&&route==="upload"){
       const access=await requireProfile(principal,url.searchParams.get("profile"));const bytes=await boundedBytes(req,6*1024*1024);if(bytes.length<12)throw new ApiError(400,"This file is empty or not a supported photo.");
@@ -131,14 +178,14 @@ async function handle(req:Request,ctx:Context){
       const hash=Array.from(new Uint8Array(bytes),v=>v.toString(16).padStart(2,"0")).join("");
       const previous=await db().prepare("SELECT profile_id,payload_hash,medication_ids FROM note_imports WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{profile_id:string;payload_hash:string;medication_ids:string}>();
       if(previous){if(previous.profile_id!==p.id||previous.payload_hash!==hash)throw new ApiError(409,"This import request changed. Review it and start a new import.");return json({ids:JSON.parse(previous.medication_ids),replayed:true});}
-      const existing=await db().prepare("SELECT data FROM medications WHERE owner_id=? AND profile_id=? LIMIT 100").bind(owner,p.id).all<{data:string}>();
+      const existing=await db().prepare("SELECT data FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' LIMIT 100").bind(owner,p.id).all<{data:string}>();
       if(existing.results.length+fields.length>100)throw new ApiError(400,"This list supports up to 100 medication entries.");
       const identity=(m:MedicationFields)=>`${m.productName.toLowerCase().replace(/\s+/g," ").trim()}|${m.strength.toLowerCase().replace(/\s+/g," ").trim()}`;
       const seen=new Set(existing.results.map(r=>identity(JSON.parse(r.data))));
       for(const f of fields){if(seen.has(identity(f)))throw new ApiError(409,`Already listed or repeated: ${f.productName} ${f.strength}. Review it instead of importing a duplicate.`);seen.add(identity(f));}
       const ids=fields.map(()=>crypto.randomUUID()),now=new Date().toISOString();
       const statements=[db().prepare("INSERT INTO note_imports (id,owner_id,profile_id,idempotency_key,payload_hash,medication_ids,created_at) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),owner,p.id,key,hash,JSON.stringify(ids),now)];
-      fields.forEach((f,i)=>{statements.push(db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?)").bind(ids[i],owner,p.id,JSON.stringify(f),"[]",now,now));statements.push(event(owner,p.id,ids[i],"historical_note_imported",1));});
+      fields.forEach((f,i)=>{statements.push(db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,list_state,created_at,updated_at) VALUES (?,?,?,?,?,1,'active',?,?)").bind(ids[i],owner,p.id,JSON.stringify(f),"[]",now,now));statements.push(event(owner,p.id,ids[i],"historical_note_imported",1));});
       try{await db().batch(statements);}catch(e){const retry=await db().prepare("SELECT profile_id,payload_hash,medication_ids FROM note_imports WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{profile_id:string;payload_hash:string;medication_ids:string}>();if(retry&&retry.profile_id===p.id&&retry.payload_hash===hash)return json({ids:JSON.parse(retry.medication_ids),replayed:true});throw e;}
       return json({ids,unconfirmed:true},201);
     }
@@ -153,28 +200,105 @@ async function handle(req:Request,ctx:Context){
     }
     if(req.method==="POST"&&route==="medication"){
       const b=await body(req),access=await requireProfile(principal,b.profileId),fields=validateFields(b.fields);fields.adherenceReportedAt=fields.adherence==="not_reported"?"":new Date().toISOString();const sourceIds=await sources(access.dataOwnerId,access.profile.id,b.sourceIds||[]);
-      const count=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=?").bind(access.dataOwnerId,access.profile.id).first<{n:number}>();if((count?.n||0)>=100)throw new ApiError(400,"This prototype supports up to 100 entries in a list.");
-      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?)").bind(mid,access.dataOwnerId,access.profile.id,JSON.stringify(fields),JSON.stringify(sourceIds),now,now),event(access.dataOwnerId,access.profile.id,mid,"medication_created",1)]);return json({medication:med((await requireMedication(principal,mid)).row)},201);
+      const count=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active'").bind(access.dataOwnerId,access.profile.id).first<{n:number}>();if((count?.n||0)>=100)throw new ApiError(400,"This prototype supports up to 100 entries in a list.");
+      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,list_state,created_at,updated_at) VALUES (?,?,?,?,?,1,'active',?,?)").bind(mid,access.dataOwnerId,access.profile.id,JSON.stringify(fields),JSON.stringify(sourceIds),now,now),event(access.dataOwnerId,access.profile.id,mid,"medication_created",1)]);
+      await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=''").bind(access.dataOwnerId,access.profile.id,principal).run();
+      return json({medication:med((await requireMedication(principal,mid)).row)},201);
     }
     if(req.method==="PUT"&&parts[0]==="medication"&&parts.length===2){
-      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision),fields=validateFields(b.fields);const previous=JSON.parse(row.data);if(previous.sourceDocument){fields.sourceDocument=previous.sourceDocument;fields.sourceDate=previous.sourceDate||"";fields.sourceText=previous.sourceText||"";}fields.adherenceReportedAt=fields.adherence==="not_reported"?"":b.adherenceReviewed===true||fields.adherence!==previous.adherence?new Date().toISOString():(previous.adherenceReportedAt||"");const sourceIds=await sources(access.dataOwnerId,row.profile_id,b.sourceIds||[]);const now=new Date().toISOString();
-      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(JSON.stringify(fields),JSON.stringify(sourceIds),now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_updated",rev+1).run();return json({medication:med((await requireMedication(principal,row.id)).row)});
+      const {row,access}=await requireMedication(principal,parts[1]);if(row.list_state!=="active")throw new ApiError(409,"This medication is not on the active list. Undo the change first if needed.");
+      const b=await body(req),rev=revision(b.revision),fields=validateFields(b.fields);const previous=JSON.parse(row.data);if(previous.sourceDocument){fields.sourceDocument=previous.sourceDocument;fields.sourceDate=previous.sourceDate||"";fields.sourceText=previous.sourceText||"";}fields.adherenceReportedAt=fields.adherence==="not_reported"?"":b.adherenceReviewed===true||fields.adherence!==previous.adherence?new Date().toISOString():(previous.adherenceReportedAt||"");const sourceIds=await sources(access.dataOwnerId,row.profile_id,b.sourceIds||[]);const now=new Date().toISOString();
+      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'").bind(JSON.stringify(fields),JSON.stringify(sourceIds),now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_updated",rev+1).run();
+      await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?").bind(access.dataOwnerId,row.profile_id,principal,row.id).run();
+      return json({medication:med((await requireMedication(principal,row.id)).row)});
+    }
+    if(req.method==="POST"&&parts[0]==="medication"&&parts[2]==="change"&&parts.length===3){
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision),reason=parseChangeReason(b.reason);
+      if(row.revision!==rev)throw new ApiError(409,"This entry changed. Reload before updating it.");
+      if(row.list_state!=="active")throw new ApiError(409,"This medication is already off the active list.");
+      const now=new Date().toISOString();const prior=JSON.parse(row.data) as MedicationFields;
+      const changeId=crypto.randomUUID();
+      if(reason==="no_longer_take"){
+        const next={...prior,status:"stopped" as const,actualUseUnknown:false,actualDose:"",frequency:"unknown" as const};
+        const result=await db().prepare("UPDATE medications SET data=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'")
+          .bind(JSON.stringify(next),now,row.id,access.dataOwnerId,rev).run();
+        if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before updating it.");
+        await db().batch([
+          db().prepare("INSERT INTO medication_change_events (id,owner_id,profile_id,medication_id,actor_principal_id,reason,prior_data,prior_source_ids,prior_revision,prior_confirmed_revision,prior_confirmed_at,prior_list_state,undone_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)")
+            .bind(changeId,access.dataOwnerId,row.profile_id,row.id,principal,"no_longer_take",row.data,row.source_ids,row.revision,row.confirmed_revision,row.confirmed_at,row.list_state,now),
+          event(access.dataOwnerId,row.profile_id,row.id,"medication_no_longer_take",rev+1),
+        ]);
+        await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND medication_id=?").bind(access.dataOwnerId,row.profile_id,row.id).run();
+        return json({medication:med((await requireMedication(principal,row.id)).row),changeEventId:changeId,reason,note:"Recorded that the patient no longer takes this. This does not discontinue a prescription."});
+      }
+      const result=await db().prepare("UPDATE medications SET list_state='suppressed',revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'")
+        .bind(now,row.id,access.dataOwnerId,rev).run();
+      if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before updating it.");
+      await db().batch([
+        db().prepare("INSERT INTO medication_change_events (id,owner_id,profile_id,medication_id,actor_principal_id,reason,prior_data,prior_source_ids,prior_revision,prior_confirmed_revision,prior_confirmed_at,prior_list_state,undone_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)")
+          .bind(changeId,access.dataOwnerId,row.profile_id,row.id,principal,"added_by_mistake",row.data,row.source_ids,row.revision,row.confirmed_revision,row.confirmed_at,row.list_state,now),
+        event(access.dataOwnerId,row.profile_id,row.id,"medication_added_by_mistake",rev+1),
+      ]);
+      await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND medication_id=?").bind(access.dataOwnerId,row.profile_id,row.id).run();
+      return json({suppressed:true,changeEventId:changeId,reason,medicationId:row.id,revision:rev+1,note:"Removed from the active list as added by mistake. Undo is available. History is preserved."});
+    }
+    if(req.method==="POST"&&parts[0]==="medication"&&parts[2]==="undo-change"&&parts.length===3){
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);
+      if(row.revision!==rev)throw new ApiError(409,"This entry changed. Reload before undoing.");
+      const changeId=typeof b.changeEventId==="string"?id(b.changeEventId):null;
+      const change=changeId
+        ? await db().prepare("SELECT * FROM medication_change_events WHERE id=? AND medication_id=? AND owner_id=? AND undone_at IS NULL").bind(changeId,row.id,access.dataOwnerId).first<{id:string;reason:string;prior_data:string;prior_source_ids:string;prior_revision:number;prior_confirmed_revision:number|null;prior_confirmed_at:string|null;prior_list_state:string}>()
+        : await db().prepare("SELECT * FROM medication_change_events WHERE medication_id=? AND owner_id=? AND undone_at IS NULL AND reason IN ('no_longer_take','added_by_mistake') ORDER BY created_at DESC LIMIT 1").bind(row.id,access.dataOwnerId).first<{id:string;reason:string;prior_data:string;prior_source_ids:string;prior_revision:number;prior_confirmed_revision:number|null;prior_confirmed_at:string|null;prior_list_state:string}>();
+      if(!change)throw new ApiError(404,"No reversible change was found for this medication.");
+      const now=new Date().toISOString();
+      const undoReason=change.reason==="no_longer_take"?"undo_no_longer_take":"undo_added_by_mistake";
+      const restoreData=change.prior_data;
+      const restoreSources=change.prior_source_ids;
+      const restoreList=change.reason==="added_by_mistake"?"active":change.prior_list_state||"active";
+      // Undo restores prior values but bumps revision and clears confirmation so the patient must re-check.
+      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,list_state=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=?")
+        .bind(restoreData,restoreSources,restoreList,now,row.id,access.dataOwnerId,rev).run();
+      if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before undoing.");
+      const undoId=crypto.randomUUID();
+      await db().batch([
+        db().prepare("UPDATE medication_change_events SET undone_at=? WHERE id=?").bind(now,change.id),
+        db().prepare("INSERT INTO medication_change_events (id,owner_id,profile_id,medication_id,actor_principal_id,reason,prior_data,prior_source_ids,prior_revision,prior_confirmed_revision,prior_confirmed_at,prior_list_state,undone_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)")
+          .bind(undoId,access.dataOwnerId,row.profile_id,row.id,principal,undoReason,row.data,row.source_ids,row.revision,row.confirmed_revision,row.confirmed_at,row.list_state,now),
+        event(access.dataOwnerId,row.profile_id,row.id,undoReason,rev+1),
+      ]);
+      return json({medication:med((await requireMedication(principal,row.id)).row),undoneChangeEventId:change.id,changeEventId:undoId,reason:undoReason,note:"Change undone. Confirm the medication again before finishing your list."});
     }
     if(req.method==="POST"&&parts[0]==="confirm"&&parts.length===2){
-      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);if(b.acknowledged!==true)throw new ApiError(400,"Explicitly confirm this medication after reviewing it.");if(rev!==row.revision)throw new ApiError(409,"This entry changed. Please review its latest version.");validateFields(JSON.parse(row.data),true);const now=new Date().toISOString();
-      const result=await db().prepare("UPDATE medications SET confirmed_revision=revision,confirmed_at=?,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(now,now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Please review its latest version.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_confirmed",rev).run();return json({medication:med((await requireMedication(principal,row.id)).row)});
+      const {row,access}=await requireMedication(principal,parts[1]);if(row.list_state!=="active")throw new ApiError(409,"This medication is not on the active list.");
+      const b=await body(req),rev=revision(b.revision);if(b.acknowledged!==true)throw new ApiError(400,"Explicitly confirm this medication after reviewing it.");if(rev!==row.revision)throw new ApiError(409,"This entry changed. Please review its latest version.");validateFields(JSON.parse(row.data),true);const now=new Date().toISOString();
+      const result=await db().prepare("UPDATE medications SET confirmed_revision=revision,confirmed_at=?,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'").bind(now,now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Please review its latest version.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_confirmed",rev).run();
+      await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?").bind(access.dataOwnerId,row.profile_id,principal,row.id).run();
+      return json({medication:med((await requireMedication(principal,row.id)).row)});
     }
     if(req.method==="DELETE"&&parts[0]==="medication"&&parts.length===2){
-      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);const result=await db().prepare("DELETE FROM medications WHERE id=? AND owner_id=? AND revision=?").bind(row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before removing it.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_removed",rev).run();return json({deleted:true});
+      // Soft-suppress as "added by mistake" — hard deletes are not used for clinical history.
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);
+      if(row.list_state!=="active")throw new ApiError(409,"This medication is already off the active list.");
+      if(row.revision!==rev)throw new ApiError(409,"This entry changed. Reload before removing it.");
+      const now=new Date().toISOString(),changeId=crypto.randomUUID();
+      const result=await db().prepare("UPDATE medications SET list_state='suppressed',revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'")
+        .bind(now,row.id,access.dataOwnerId,rev).run();
+      if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before removing it.");
+      await db().batch([
+        db().prepare("INSERT INTO medication_change_events (id,owner_id,profile_id,medication_id,actor_principal_id,reason,prior_data,prior_source_ids,prior_revision,prior_confirmed_revision,prior_confirmed_at,prior_list_state,undone_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)")
+          .bind(changeId,access.dataOwnerId,row.profile_id,row.id,principal,"added_by_mistake",row.data,row.source_ids,row.revision,row.confirmed_revision,row.confirmed_at,row.list_state,now),
+        event(access.dataOwnerId,row.profile_id,row.id,"medication_added_by_mistake",rev+1),
+      ]);
+      return json({suppressed:true,changeEventId:changeId,reason:"added_by_mistake"});
     }
     if(req.method==="POST"&&route==="card"){
       const b=await body(req),access=await requireProfile(principal,b.profileId);const owner=access.dataOwnerId,p=access.profile;const recipient=text(b.recipient,120,true),patientName=text(b.patientName,120,true),key=id(b.idempotencyKey);
       const existing=await db().prepare("SELECT id,profile_id FROM snapshots WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{id:string;profile_id:string}>();if(existing){if(existing.profile_id!==p.id)throw new ApiError(409,"This card request belongs to another list.");return json({id:existing.id});}
-      const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? ORDER BY created_at LIMIT 100").bind(owner,p.id).all<Row>();const list=rows.results.map(med);
+      const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' ORDER BY created_at LIMIT 100").bind(owner,p.id).all<Row>();const list=rows.results.map(med);
       if(!canCreateCard(list))throw new ApiError(409,"Confirm every medication's current version before creating a provider card.");for(const m of list)validateFields(m,true);
       const cid=crypto.randomUUID(),now=new Date().toISOString();const data=JSON.stringify({id:cid,recipient,patientName,createdAt:now,medications:list});
       const exact=JSON.stringify(list.map(m=>({id:m.id,revision:m.revision})));
-      const sql=`INSERT INTO snapshots (id,owner_id,profile_id,recipient,patient_name,data,idempotency_key,created_at) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM medications WHERE owner_id=? AND profile_id=?)=? AND NOT EXISTS (SELECT 1 FROM medications AS m WHERE owner_id=? AND profile_id=? AND (confirmed_revision IS NULL OR confirmed_revision!=revision OR confirmed_at IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(?) AS expected WHERE json_extract(expected.value,'$.id')=m.id AND json_extract(expected.value,'$.revision')=m.revision)))`;
+      const sql=`INSERT INTO snapshots (id,owner_id,profile_id,recipient,patient_name,data,idempotency_key,created_at) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active')=? AND NOT EXISTS (SELECT 1 FROM medications AS m WHERE owner_id=? AND profile_id=? AND list_state='active' AND (confirmed_revision IS NULL OR confirmed_revision!=revision OR confirmed_at IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(?) AS expected WHERE json_extract(expected.value,'$.id')=m.id AND json_extract(expected.value,'$.revision')=m.revision)))`;
       let result;
       try {result=await db().prepare(sql).bind(cid,owner,p.id,recipient,patientName,data,key,now,owner,p.id,list.length,owner,p.id,exact).run();}catch(e){const duplicate=await db().prepare("SELECT id FROM snapshots WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{id:string}>();if(duplicate)return json({id:duplicate.id});throw e;}
       if(result.meta.changes!==1)throw new ApiError(409,"The list changed while the card was being created. Review and confirm the latest entries.");await event(owner,p.id,cid,"provider_card_created").run();return json({id:cid},201);
@@ -192,6 +316,7 @@ async function handle(req:Request,ctx:Context){
     if(e instanceof AuthzError)return json({error:e.message},e.status);
     if(e instanceof ClinicApiError)return json({error:e.message},e.status);
     if(e instanceof ClinicIdentityError)return json({error:e.message},400);
+    if(e instanceof MedicationChangeError)return json({error:e.message},400);
     if(e instanceof MedicationValidationError)return json({error:e.message},400);
     return json({error:"The action could not be completed. Please try again. Reload the list before retrying a save."},500);
   }

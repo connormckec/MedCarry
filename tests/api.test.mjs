@@ -7,6 +7,7 @@ import * as medicationLogic from '../lib/medication.ts';
 import * as clinicApi from '../lib/clinic-api.ts';
 import * as clinicIdentity from '../lib/clinic-identity.ts';
 import * as clinicAuthz from '../lib/clinic-authz.ts';
+import * as medicationChanges from '../lib/medication-changes.ts';
 import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC,SYNTHETIC_HELPER_PRINCIPAL_ID,SYNTHETIC_PATIENT_PRINCIPAL_ID} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
@@ -43,6 +44,9 @@ function fixture(){
     authorizeProfileAccess:clinicAuthz.authorizeProfileAccess,
     authorizeUploadAccess:clinicAuthz.authorizeUploadAccess,
     listAccessibleProfiles:clinicAuthz.listAccessibleProfiles,
+    MedicationChangeError:medicationChanges.MedicationChangeError,
+    parseChangeReason:medicationChanges.parseChangeReason,
+    parseEditorDraft:medicationChanges.parseEditorDraft,
     SYNTHETIC,
   };
   const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
@@ -203,5 +207,58 @@ test('client view header cannot escalate a patient into staff tools',async()=>{
   f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test',fullName:'Alice Example'});
   assert.equal((await f.request('profile','POST',{name:'x'},{'X-Medcarry-View':'staff'})).status,403);
   assert.equal((await f.request('search?q=aspirin', 'GET', undefined, {'X-Medcarry-View':'staff'})).status,403);
+  f.sqlite.close();
+});
+test('no longer take retains the medication and invalidates confirmation',async()=>{
+  const f=fixture(),p=await setup(f),m=await add(f,p);
+  await f.request('confirm/'+m.id,'POST',{revision:1,acknowledged:true});
+  const changed=await f.request('medication/'+m.id+'/change','POST',{revision:1,reason:'no_longer_take'});
+  assert.equal(changed.status,200);
+  assert.equal(changed.data.medication.status,'stopped');
+  assert.equal(changed.data.medication.confirmedRevision,null);
+  assert.equal(changed.data.reason,'no_longer_take');
+  const list=await f.request('list?profile='+p);
+  assert.equal(list.data.medications.length,1);
+  assert.equal(list.data.medications[0].status,'stopped');
+  assert.equal(list.data.changeEvents[0].reason,'no_longer_take');
+  assert.equal((await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()})).status,409);
+  f.sqlite.close();
+});
+test('added by mistake suppresses with Undo restoring active list and clearing confirmation',async()=>{
+  const f=fixture(),p=await setup(f),m=await add(f,p);
+  await f.request('confirm/'+m.id,'POST',{revision:1,acknowledged:true});
+  const suppressed=await f.request('medication/'+m.id+'/change','POST',{revision:1,reason:'added_by_mistake'});
+  assert.equal(suppressed.status,200);
+  assert.equal(suppressed.data.suppressed,true);
+  assert.equal((await f.request('list?profile='+p)).data.medications.length,0);
+  assert.equal(f.sqlite.prepare("SELECT list_state s FROM medications WHERE id=?").get(m.id).s,'suppressed');
+  const undone=await f.request('medication/'+m.id+'/undo-change','POST',{revision:2,changeEventId:suppressed.data.changeEventId});
+  assert.equal(undone.status,200);
+  assert.equal(undone.data.medication.confirmedRevision,null);
+  assert.equal((await f.request('list?profile='+p)).data.medications.length,1);
+  assert.match(undone.data.note,/Confirm/i);
+  f.sqlite.close();
+});
+test('editor draft autosave resumes and clears after confirm',async()=>{
+  const f=fixture(),p=await setup(f);
+  const saved=await f.request('draft','PUT',{profileId:p,medicationId:'',draft:{fields:valid(),sourceIds:[],step:2}});
+  assert.equal(saved.status,201);
+  const list=await f.request('list?profile='+p);
+  assert.equal(list.data.openDrafts.length,1);
+  assert.equal(list.data.openDrafts[0].draft.fields.productName,'Fictional tablet');
+  const m=await add(f,p);
+  await f.request('draft','PUT',{profileId:p,medicationId:m.id,draft:{fields:{...valid(),actualDose:'1/2'},sourceIds:[],medicationRevision:1}});
+  await f.request('confirm/'+m.id,'POST',{revision:1,acknowledged:true});
+  const after=await f.request('list?profile='+p);
+  assert.equal(after.data.openDrafts.filter(d=>d.medicationId===m.id).length,0);
+  f.sqlite.close();
+});
+test('DELETE medication soft-suppresses instead of erasing history',async()=>{
+  const f=fixture(),p=await setup(f),m=await add(f,p);
+  const r=await f.request('medication/'+m.id,'DELETE',{revision:1});
+  assert.equal(r.status,200);
+  assert.equal(r.data.suppressed,true);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);
+  assert.equal(f.sqlite.prepare("SELECT list_state s FROM medications").get().s,'suppressed');
   f.sqlite.close();
 });

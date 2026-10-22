@@ -1,10 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Camera, Check, ChevronRight, LoaderCircle, Pill, ShieldCheck, Upload, WalletCards } from "lucide-react";
-import { isConfirmed, type Medication } from "@/lib/medication";
+import { isConfirmed, type Medication, type MedicationFields } from "@/lib/medication";
 import "./patient/patient.css";
 
-type Props={medications:Medication[];loading:boolean;signIn:string;error:string;processing:boolean;finished:boolean;onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication)=>void;onDone:()=>void;onViewList:()=>void;onChangeList:()=>void};
+type ResumeDraft={id:string;medicationId:string|null;updatedAt:string;draft:{fields:Partial<MedicationFields>&{productName?:string};sourceIds:string[]}};
+type Props={medications:Medication[];loading:boolean;signIn:string;error:string;processing:boolean;finished:boolean;resumeDraft:ResumeDraft|null;onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication)=>void;onResumeDraft:(d:ResumeDraft)=>void;onDone:()=>void;onViewList:()=>void;onChangeList:()=>void};
 export default function GuidedPatientHome(p:Props){
   const [adding,setAdding]=useState(false);
   const pending=p.medications.filter(m=>!isConfirmed(m));
@@ -22,6 +23,7 @@ export default function GuidedPatientHome(p:Props){
         <button className="patient-primary" disabled={p.processing} onClick={p.onViewList}>View my list<ChevronRight size={22}/></button>
         <button className="patient-text" onClick={()=>{setAdding(false);p.onChangeList();}}>Add or change a medication</button>
       </>:<>
+        {!capture&&p.resumeDraft&&<button className="patient-secondary" disabled={p.processing} onClick={()=>p.onResumeDraft(p.resumeDraft!)}>Continue unfinished medication{p.resumeDraft.draft.fields.productName?`: ${p.resumeDraft.draft.fields.productName}`:""}<ChevronRight size={21}/></button>}
         <h1>{capture?"Add a medication.":pending.length?"Check your medicines.":"Anything else?"}</h1>
         <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time.":"Include vitamins and supplements."}</p>
         {capture?<div className="patient-capture">
