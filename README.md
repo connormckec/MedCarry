@@ -33,9 +33,19 @@ See [`docs/CURSOR_HANDOFF.md`](docs/CURSOR_HANDOFF.md) for clean-clone setup, th
 
 Vinext / React on Cloudflare Workers with Sites-owned authentication. `.openai/hosting.json` declares `DB` and `BUCKET`. Identity comes from the platform, never a client-supplied account ID. All read and mutation routes enforce ownership. Mutations also validate request origin, inputs, current revisions and source-photo ownership. Images have bounded uploads, byte-signature checks, private no-store delivery and no public bucket URLs.
 
-Install through the Sites dependency helper. `npm run build` copies pinned dependency-owned OCR worker/core/language assets into ignored `public/ocr`, then builds the app. The resulting deployment includes these assets. `npm run db:generate` produces append-only schema migrations. Apply local migrations following the starter instructions; Sites applies hosted migrations during publication.
+Exact local setup, mock sign-in limits, synthetic fixtures, and staging notes: **[`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md)**.
 
-`npm test` runs medication validation, SQLite snapshot/concurrency tests, and request-handler integration tests against in-memory D1/R2 adapters. `node node_modules/typescript/bin/tsc --noEmit` checks types.
+```sh
+npm install --global pnpm@11.25.0
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
+pnpm dev   # http://localhost:5173 — loopback mock auth only
+```
+
+`pnpm build` copies pinned OCR assets into ignored `public/ocr`, then builds. `pnpm db:generate` appends Drizzle migrations; Sites applies hosted migrations on publish. Additive clinic-identity tables ship in `drizzle/0002_clinic_identity_foundation.sql` without changing existing medication records.
+
+Staff workspace **Testing tools → Load synthetic appointment header** seeds fictional practice/patient/appointment/respondent rows (local mock principal only) and shows the minimal staff identity header. Matching proposes candidates; it never auto-merges or authenticates.
 
 ## Scope and limits
 

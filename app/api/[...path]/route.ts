@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser, chatGPTSignInPath } from "@/app/chatgpt-auth";
 import { MedicationValidationError, emptyMedication, validateFields, parseLabel, canCreateCard, type Medication, type MedicationFields } from "@/lib/medication";
+import { ClinicApiError, ensureSyntheticClinic, getStaffIdentityHeader } from "@/lib/clinic-api";
+import { ClinicIdentityError, proposePatientMatch, type PatientRecord } from "@/lib/clinic-identity";
+import { SYNTHETIC } from "@/lib/synthetic-clinic";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
@@ -39,6 +42,31 @@ async function handle(req:Request,ctx:Context){
     if(req.method==="GET"&&route==="bootstrap"){
       const ps=await db().prepare("SELECT id,name,created_at FROM profiles WHERE owner_id=? ORDER BY created_at LIMIT 12").bind(owner).all();
       return json({profiles:ps.results,displayName:user.fullName?.split(" ")[0]||"Your account"});
+    }
+    if(req.method==="POST"&&route==="clinic/seed-synthetic"){
+      const result=await ensureSyntheticClinic(db(),owner);
+      return json({...result,practiceId:SYNTHETIC.practiceId},result.seeded?201:200);
+    }
+    if(req.method==="GET"&&route==="clinic/staff-header"){
+      const header=await getStaffIdentityHeader(db(),owner,url.searchParams.get("appointment"),url.searchParams.get("respondent")||undefined);
+      return json({header});
+    }
+    if(req.method==="POST"&&route==="clinic/match-proposal"){
+      const b=await body(req);const practiceId=id(b.practiceId);
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,owner).first();
+      if(!membership)throw new ApiError(403,"Staff access is required for patient matching.");
+      const rows=await db().prepare("SELECT id,practice_id,legal_name,dob,postal_code FROM patients WHERE practice_id=?").bind(practiceId).all<{id:string;practice_id:string;legal_name:string;dob:string;postal_code:string|null}>();
+      const patients:PatientRecord[]=rows.results.map(r=>({id:r.id,practiceId:r.practice_id,legalName:r.legal_name,dob:r.dob,postalCode:r.postal_code}));
+      const mappings=await db().prepare("SELECT patient_id,external_patient_id,verification_status FROM external_patient_mappings WHERE practice_id=?").bind(practiceId).all<{patient_id:string;external_patient_id:string;verification_status:"unverified"|"verified"|"needs_review"}>();
+      const proposal=proposePatientMatch({
+        patients,
+        legalName:typeof b.legalName==="string"?b.legalName:undefined,
+        dob:typeof b.dob==="string"?b.dob:undefined,
+        postalCode:typeof b.postalCode==="string"?b.postalCode:null,
+        externalPatientId:typeof b.externalPatientId==="string"?b.externalPatientId:null,
+        mappings:mappings.results.map(m=>({patientId:m.patient_id,externalPatientId:m.external_patient_id,verificationStatus:m.verification_status})),
+      });
+      return json({proposal,note:"Matching proposes candidates for staff review. It does not authenticate or attach records."});
     }
     if(req.method==="POST"&&route==="profile"){
       const b=await body(req);const name=text(b.name,80,true);const count=await db().prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_id=?").bind(owner).first<{n:number}>();if((count?.n||0)>=12)throw new ApiError(400,"You can create up to 12 separate lists.");
@@ -130,6 +158,12 @@ async function handle(req:Request,ctx:Context){
     }
     if(req.method==="GET"&&parts[0]==="card"&&parts.length===2){const row=await db().prepare("SELECT data FROM snapshots WHERE id=? AND owner_id=?").bind(id(parts[1]),owner).first<{data:string}>();if(!row)throw new ApiError(404,"This card was not found.");return json({card:JSON.parse(row.data)});}
     throw new ApiError(404,"This action was not found.");
-  } catch(e){if(e instanceof ApiError)return json({error:e.message},e.status);if(e instanceof MedicationValidationError)return json({error:e.message},400);return json({error:"The action could not be completed. Please try again. Reload the list before retrying a save."},500);}
+  } catch(e){
+    if(e instanceof ApiError)return json({error:e.message},e.status);
+    if(e instanceof ClinicApiError)return json({error:e.message},e.status);
+    if(e instanceof ClinicIdentityError)return json({error:e.message},400);
+    if(e instanceof MedicationValidationError)return json({error:e.message},400);
+    return json({error:"The action could not be completed. Please try again. Reload the list before retrying a save."},500);
+  }
 }
 export const GET=handle;export const POST=handle;export const PUT=handle;export const DELETE=handle;

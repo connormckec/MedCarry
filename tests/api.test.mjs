@@ -4,6 +4,9 @@ import {DatabaseSync} from 'node:sqlite';
 import {readFileSync,readdirSync} from 'node:fs';
 import ts from 'typescript';
 import * as medicationLogic from '../lib/medication.ts';
+import * as clinicApi from '../lib/clinic-api.ts';
+import * as clinicIdentity from '../lib/clinic-identity.ts';
+import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
 const migrations=new URL('../drizzle/',import.meta.url);
@@ -28,8 +31,16 @@ function fixture(){
     }
   };
   const BUCKET={async put(k,bytes,o){objects.set(k,{bytes:new Uint8Array(bytes),type:o.httpMetadata.contentType})},async get(k){const o=objects.get(k);return o?{body:new Blob([o.bytes]).stream()}:null},async delete(k){objects.delete(k)}};
-  const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic)];
-  const values=[{DB,BUCKET},async()=>user,()=>'/signin-with-chatgpt?return_to=%2F',...Object.values(medicationLogic)];
+  const clinicBindings={
+    ClinicApiError:clinicApi.ClinicApiError,
+    ensureSyntheticClinic:clinicApi.ensureSyntheticClinic,
+    getStaffIdentityHeader:clinicApi.getStaffIdentityHeader,
+    ClinicIdentityError:clinicIdentity.ClinicIdentityError,
+    proposePatientMatch:clinicIdentity.proposePatientMatch,
+    SYNTHETIC,
+  };
+  const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
+  const values=[{DB,BUCKET},async()=>user,()=>'/signin-with-chatgpt?return_to=%2F',...Object.values(medicationLogic),...Object.values(clinicBindings)];
   const handlers=new Function(...names,`${compiled}\nreturn {GET,POST,PUT,DELETE};`)(...values);
   async function request(path,method='GET',payload,headers={}){
     const h={'Origin':'https://medcarry.test','X-Medcarry-Request':'1',...headers};if(payload!==undefined&&!(payload instanceof Uint8Array))h['Content-Type']='application/json';
@@ -58,3 +69,54 @@ test('import duplicate detection and date validation happen before any writes',a
 test('imports require staff review and cannot cross owner or profile boundaries',async()=>{const f=fixture(),p=await setup(f);assert.equal((await f.request('note-import','POST',importBody(p,{reviewed:false}))).status,400);assert.equal((await f.request('note-import','POST',importBody(p,{rows:Array(21).fill(valid())}))).status,400);f.setUser({userId:'other',email:'other@example.test'});assert.equal((await f.request('note-import','POST',importBody(p))).status,404);f.setUser(null);assert.equal((await f.request('note-import','POST',importBody(p))).status,401);f.sqlite.close();});
 test('a database failure rolls back imported rows and its idempotency reservation',async()=>{const f=fixture(),p=await setup(f);f.sqlite.exec("CREATE TRIGGER reject_import BEFORE INSERT ON medications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");const payload=importBody(p);assert.equal((await f.request('note-import','POST',payload)).status,500);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM note_imports').get().n,0);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,0);f.sqlite.exec('DROP TRIGGER reject_import');assert.equal((await f.request('note-import','POST',payload)).status,201);f.sqlite.close();});
 test('imported medicine can receive a photo and current report without losing historical evidence',async()=>{const f=fixture(),p=await setup(f);const imported=await f.request('note-import','POST',importBody(p));const mid=imported.data.ids[0];const photo=await f.request('upload?profile='+p,'POST',new Uint8Array([255,216,255,0,0,0,0,0,0,0,0,0]));const before=(await f.request('list?profile='+p)).data.medications[0];const updated=await f.request('medication/'+mid,'PUT',{revision:1,sourceIds:[photo.data.id],fields:{...before,source:'photo',sourceDate:'2026-10-22',sourceText:'This must not replace the original evidence',status:'taking',actualUseUnknown:false,actualDose:'1/2',frequency:'daily'}});assert.equal(updated.status,200);assert.equal(updated.data.medication.sourceText,before.sourceText);assert.equal(updated.data.medication.sourceDate,'2026-07-01');assert.equal(updated.data.medication.revision,2);assert.equal((await f.request('confirm/'+mid,'POST',{revision:1,acknowledged:true})).status,409);assert.equal((await f.request('confirm/'+mid,'POST',{revision:2,acknowledged:true})).status,200);const made=await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()});assert.equal(made.status,201);const snapshot=await f.request('card/'+made.data.id);assert.equal(snapshot.data.card.medications[0].actualDose,'1/2');assert.equal(snapshot.data.card.medications[0].sourceDate,'2026-07-01');assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);f.sqlite.close();});
+test('synthetic clinic seed is limited to the local mock principal',async()=>{
+  const f=fixture();
+  assert.equal((await f.request('clinic/seed-synthetic','POST',{})).status,403);
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  const seeded=await f.request('clinic/seed-synthetic','POST',{});
+  assert.equal(seeded.status,201);
+  assert.equal(seeded.data.appointmentId,SYNTHETIC.appointmentAliceA.id);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM patients').get().n,3);
+  assert.equal(f.sqlite.prepare("SELECT verification_status s FROM external_patient_mappings").get().s,'unverified');
+  const again=await f.request('clinic/seed-synthetic','POST',{});
+  assert.equal(again.status,200);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM patients').get().n,3);
+  f.sqlite.close();
+});
+test('staff identity header requires membership and keeps helper distinct from patient',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const header=await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id);
+  assert.equal(header.status,200);
+  assert.equal(header.data.header.patient.legalName,'Alice Example');
+  assert.equal(header.data.header.patient.dob,'1948-03-12');
+  assert.equal(header.data.header.patient.postalCode,'02115');
+  assert.equal(header.data.header.externalMapping.verificationStatus,'unverified');
+  assert.equal(header.data.header.matchingStatus,'unverified_mapping');
+  assert.equal(header.data.header.respondent.completionRole,'patient');
+  assert.equal(header.data.header.submissionStatus,'not_started');
+  const helper=await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id+'&respondent='+SYNTHETIC.respondentHelper.id);
+  assert.equal(helper.status,200);
+  assert.equal(helper.data.header.respondent.completionRole,'helper');
+  assert.equal(helper.data.header.respondent.completionLabel,'Authorized helper');
+  assert.notEqual(helper.data.header.respondent.displayName,helper.data.header.patient.legalName);
+  f.setUser({userId:'stranger',email:'stranger@example.test'});
+  assert.equal((await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id)).status,403);
+  f.sqlite.close();
+});
+test('match proposal is staff-only and does not auto-attach on name alone',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const unique=await f.request('clinic/match-proposal','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Alice Example',dob:'1948-03-12'});
+  assert.equal(unique.status,200);
+  assert.equal(unique.data.proposal.status,'unique');
+  const ambiguousSeed=f.sqlite.prepare('INSERT INTO patients (id,practice_id,legal_name,dob,postal_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?)');
+  ambiguousSeed.run('a2222222-2222-4222-8222-222222222299',SYNTHETIC.practiceId,'Alice Example','1948-03-12','02115',new Date().toISOString(),new Date().toISOString());
+  const ambiguous=await f.request('clinic/match-proposal','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Alice Example',dob:'1948-03-12',postalCode:'02115'});
+  assert.equal(ambiguous.data.proposal.status,'ambiguous');
+  f.setUser({userId:'stranger',email:'stranger@example.test'});
+  assert.equal((await f.request('clinic/match-proposal','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Alice Example',dob:'1948-03-12'})).status,403);
+  f.sqlite.close();
+});
