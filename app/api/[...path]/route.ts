@@ -13,6 +13,26 @@ import {
 } from "@/lib/clinic-authz";
 import { MedicationChangeError, parseChangeReason, parseEditorDraft } from "@/lib/medication-changes";
 import { SYNTHETIC } from "@/lib/synthetic-clinic";
+import {
+  RxNormError,
+  buildTerminologyQuery,
+  hashQuery,
+  normalizeFromDrugGroup,
+  normalizeFromFixture,
+  parseDuplicateResponse,
+  patientDuplicatePrompt,
+  applyTerminologyToFields,
+  terminologyForOutage,
+} from "@/lib/rxnorm";
+import {
+  listDuplicateFlagsForProfile,
+  listTerminologyForProfile,
+  normalizeMedicationFields,
+  refreshDuplicateFlags,
+  upsertTerminology,
+  duplicateFlagFromRow,
+  type DuplicateFlagRow,
+} from "@/lib/rxnorm-store";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
@@ -107,11 +127,18 @@ async function handle(req:Request,ctx:Context){
       const suppressed=access.canManageStaffTools
         ? (await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='suppressed' ORDER BY updated_at DESC LIMIT 40").bind(access.dataOwnerId,access.profile.id).all<Row>()).results.map(med)
         : [];
+      const [terminology,duplicateFlags]=await Promise.all([
+        listTerminologyForProfile(db(),access.dataOwnerId,access.profile.id),
+        listDuplicateFlagsForProfile(db(),access.dataOwnerId,access.profile.id),
+      ]);
       return json({
         medications:rows.results.map(med),
         cards:cards.results,
         changeEvents:changes.results,
         suppressedMedications:suppressed,
+        terminology,
+        duplicateFlags,
+        duplicatePrompt:patientDuplicatePrompt(),
         editorDraft:draft?{id:draft.id,medicationId:draft.medication_id||null,updatedAt:draft.updated_at,draft:JSON.parse(draft.draft_json)}:null,
         openDrafts:openDrafts.results.map(d=>({id:d.id,medicationId:d.medication_id||null,updatedAt:d.updated_at,draft:JSON.parse(d.draft_json)})),
         access:{actor:access.actor,practiceId:access.practiceId,patientId:access.patientId},
@@ -187,30 +214,149 @@ async function handle(req:Request,ctx:Context){
       const statements=[db().prepare("INSERT INTO note_imports (id,owner_id,profile_id,idempotency_key,payload_hash,medication_ids,created_at) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),owner,p.id,key,hash,JSON.stringify(ids),now)];
       fields.forEach((f,i)=>{statements.push(db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,list_state,created_at,updated_at) VALUES (?,?,?,?,?,1,'active',?,?)").bind(ids[i],owner,p.id,JSON.stringify(f),"[]",now,now));statements.push(event(owner,p.id,ids[i],"historical_note_imported",1));});
       try{await db().batch(statements);}catch(e){const retry=await db().prepare("SELECT profile_id,payload_hash,medication_ids FROM note_imports WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{profile_id:string;payload_hash:string;medication_ids:string}>();if(retry&&retry.profile_id===p.id&&retry.payload_hash===hash)return json({ids:JSON.parse(retry.medication_ids),replayed:true});throw e;}
+      for(let i=0;i<fields.length;i++){
+        const {terminology}=normalizeMedicationFields(fields[i]);
+        await upsertTerminology(db(),{ownerId:owner,profileId:p.id,medicationId:ids[i],terminology,reviewerPrincipalId:principal});
+      }
+      await refreshDuplicateFlags(db(),owner,p.id);
       return json({ids,unconfirmed:true},201);
     }
     if(req.method==="GET"&&route==="search"){
       await assertStaffToolsAllowed(db(),principal);
-      const q=text(url.searchParams.get("q")||"",180,true);if(q.length<3)throw new ApiError(400,"Enter at least three characters to search.");
-      const result=await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(q)}`,{signal:AbortSignal.timeout(8000),headers:{Accept:"application/json"}}).catch(()=>{throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");});
-      if(!result.ok)throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");
-      const data=await result.json() as {drugGroup?:{conceptGroup?:{tty?:string;conceptProperties?:{rxcui:string;name:string}[]}[]}};
+      // Terminology-only query: never patient demographics, full notes, or OCR dumps.
+      const rawName=text(url.searchParams.get("q")||"",180,true);
+      const strength=text(url.searchParams.get("strength")||"",100);
+      const formulation=(url.searchParams.get("formulation")||"other") as MedicationFields["formulation"];
+      const q=buildTerminologyQuery({productName:rawName,strength,strengthUnknown:!strength,formulation:["tablet","capsule","liquid","inhaler","injection","topical","patch","drops","powder","other"].includes(formulation)?formulation:"other",category:"prescription"});
+      const qHash=hashQuery(q);
+      const cached=await db().prepare("SELECT response_json,expires_at FROM rxnorm_query_cache WHERE query_hash=?").bind(qHash).first<{response_json:string;expires_at:string}>();
+      let data: {drugGroup?:{conceptGroup?:{tty?:string;conceptProperties?:{rxcui:string;name:string;synonym?:string;tty?:string}[]}[]}};
+      if(cached && cached.expires_at > new Date().toISOString()){
+        data=JSON.parse(cached.response_json);
+      } else {
+        const result=await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(q)}`,{signal:AbortSignal.timeout(8000),headers:{Accept:"application/json"}}).catch(()=>{throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");});
+        if(!result.ok)throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");
+        data=await result.json() as typeof data;
+        const now=new Date().toISOString();
+        const expires=new Date(Date.now()+6*60*60*1000).toISOString();
+        await db().prepare("INSERT INTO rxnorm_query_cache (query_hash,query_text,response_json,fetched_at,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(query_hash) DO UPDATE SET response_json=excluded.response_json,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,query_text=excluded.query_text")
+          .bind(qHash,q,JSON.stringify(data),now,expires).run();
+      }
       const groups=data.drugGroup?.conceptGroup||[];const allowed=groups.filter(g=>["SCD","SBD","GPCK","BPCK"].includes(g.tty||""));
-      const seen=new Set<string>();const results=allowed.flatMap(g=>g.conceptProperties||[]).filter(c=>{if(seen.has(c.rxcui))return false;seen.add(c.rxcui);return true;}).slice(0,12).map(c=>({rxCui:c.rxcui,name:c.name}));return json({results,source:"NLM RxNorm",note:"Reference matches do not establish your directions or current use."});
+      const seen=new Set<string>();const results=allowed.flatMap(g=>g.conceptProperties||[]).filter(c=>{if(seen.has(c.rxcui))return false;seen.add(c.rxcui);return true;}).slice(0,12).map(c=>({rxCui:c.rxcui,name:c.name}));return json({results,source:"NLM RxNorm",query:q,note:"Reference matches do not establish your directions or current use."});
+    }
+    if(req.method==="POST"&&route==="normalize"){
+      const b=await body(req);const {row,access}=await requireMedication(principal,b.medicationId);
+      if(row.list_state!=="active")throw new ApiError(409,"This medication is not on the active list.");
+      const fields=validateFields(JSON.parse(row.data));
+      let terminology;
+      let queryText="";
+      try{queryText=buildTerminologyQuery(fields);}catch{/* supplements / short names handled below */}
+      if(fields.category==="supplement"){
+        terminology=normalizeFromFixture(fields);
+      } else if(b.nlmUnavailable===true){
+        terminology=terminologyForOutage(fields,queryText);
+      } else if(b.preferLive===true){
+        try{
+          const q=queryText||buildTerminologyQuery(fields);
+          const qHash=hashQuery(q);
+          const cached=await db().prepare("SELECT response_json,expires_at FROM rxnorm_query_cache WHERE query_hash=?").bind(qHash).first<{response_json:string;expires_at:string}>();
+          let drugData;
+          if(cached && cached.expires_at > new Date().toISOString()) drugData=JSON.parse(cached.response_json);
+          else {
+            const result=await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(q)}`,{signal:AbortSignal.timeout(8000),headers:{Accept:"application/json"}});
+            if(!result.ok)throw new Error("nlm");
+            drugData=await result.json();
+            const now=new Date().toISOString();
+            await db().prepare("INSERT INTO rxnorm_query_cache (query_hash,query_text,response_json,fetched_at,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(query_hash) DO UPDATE SET response_json=excluded.response_json,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,query_text=excluded.query_text")
+              .bind(qHash,q,JSON.stringify(drugData),now,new Date(Date.now()+6*60*60*1000).toISOString()).run();
+          }
+          terminology=normalizeFromDrugGroup(fields,drugData);
+        }catch{
+          terminology=terminologyForOutage(fields,queryText);
+        }
+      } else {
+        terminology=normalizeFromFixture(fields);
+      }
+      const nextFields=applyTerminologyToFields(fields,terminology);
+      // Keep original source evidence on the medication row; only attach selected reference codes.
+      if(nextFields.rxCui!==fields.rxCui || nextFields.referenceName!==fields.referenceName){
+        const now=new Date().toISOString();
+        await db().prepare("UPDATE medications SET data=?,updated_at=? WHERE id=? AND owner_id=? AND list_state='active'")
+          .bind(JSON.stringify(nextFields),now,row.id,access.dataOwnerId).run();
+      }
+      const saved=await upsertTerminology(db(),{ownerId:access.dataOwnerId,profileId:row.profile_id,medicationId:row.id,terminology,reviewerPrincipalId:principal});
+      const flags=await refreshDuplicateFlags(db(),access.dataOwnerId,row.profile_id);
+      await event(access.dataOwnerId,row.profile_id,row.id,"medication_normalized").run();
+      return json({
+        terminology:saved,
+        medication:med((await requireMedication(principal,row.id)).row),
+        duplicateFlags:await listDuplicateFlagsForProfile(db(),access.dataOwnerId,row.profile_id),
+        proposedFlagCount:flags.length,
+        note:"Normalization proposes terminology only. Medications are never auto-merged or removed.",
+      });
+    }
+    if(req.method==="POST"&&route==="duplicates/review"){
+      const b=await body(req),access=await requireProfile(principal,b.profileId);
+      // Re-normalize active meds from fixtures (offline-safe) then refresh flags.
+      const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' LIMIT 100").bind(access.dataOwnerId,access.profile.id).all<Row>();
+      for(const r of rows.results){
+        const fields=validateFields(JSON.parse(r.data));
+        const {terminology,fields:next}=normalizeMedicationFields(fields,{nlmUnavailable:b.nlmUnavailable===true});
+        if(next.rxCui!==fields.rxCui || next.referenceName!==fields.referenceName){
+          await db().prepare("UPDATE medications SET data=?,updated_at=? WHERE id=? AND owner_id=?").bind(JSON.stringify(next),new Date().toISOString(),r.id,access.dataOwnerId).run();
+        }
+        await upsertTerminology(db(),{ownerId:access.dataOwnerId,profileId:access.profile.id,medicationId:r.id,terminology,reviewerPrincipalId:principal});
+      }
+      await refreshDuplicateFlags(db(),access.dataOwnerId,access.profile.id);
+      return json({
+        terminology:await listTerminologyForProfile(db(),access.dataOwnerId,access.profile.id),
+        duplicateFlags:await listDuplicateFlagsForProfile(db(),access.dataOwnerId,access.profile.id),
+        duplicatePrompt:patientDuplicatePrompt(),
+        note:"Flags are explainable proposals only. Uncertain and unmatched entries remain on the list.",
+      });
+    }
+    if(req.method==="POST"&&parts[0]==="duplicate-flag"&&parts[2]==="respond"&&parts.length===3){
+      const flagId=id(parts[1]);const b=await body(req);const response=parseDuplicateResponse(b.response);
+      const flag=await db().prepare("SELECT * FROM duplicate_flags WHERE id=?").bind(flagId).first<DuplicateFlagRow>();
+      if(!flag)throw new ApiError(404,"This duplicate flag was not found.");
+      const access=await authorizeProfileAccess(db(),principal,flag.profile_id);
+      if(flag.owner_id!==access.dataOwnerId)throw new ApiError(404,"This duplicate flag was not found.");
+      if(response==="staff_dismissed" && !access.canManageStaffTools)throw new ApiError(403,"Staff access is required to dismiss this flag.");
+      const now=new Date().toISOString();
+      await db().prepare("UPDATE duplicate_flags SET status=?, respondent_principal_id=?, responded_at=?, updated_at=? WHERE id=?")
+        .bind(response,principal,now,now,flagId).run();
+      // Never auto-merge or remove: "added_twice" records the answer only.
+      const updated=await db().prepare("SELECT * FROM duplicate_flags WHERE id=?").bind(flagId).first<DuplicateFlagRow>();
+      return json({
+        flag:duplicateFlagFromRow(updated!),
+        note:response==="added_twice"
+          ?"Recorded that one may have been added twice. Both entries stay visible until someone uses I added this by mistake / Undo."
+          :response==="take_both"
+            ?"Recorded that both are taken. Both entries remain on the list."
+            :"Recorded. The clinic can still review this flag.",
+      });
     }
     if(req.method==="POST"&&route==="medication"){
       const b=await body(req),access=await requireProfile(principal,b.profileId),fields=validateFields(b.fields);fields.adherenceReportedAt=fields.adherence==="not_reported"?"":new Date().toISOString();const sourceIds=await sources(access.dataOwnerId,access.profile.id,b.sourceIds||[]);
       const count=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active'").bind(access.dataOwnerId,access.profile.id).first<{n:number}>();if((count?.n||0)>=100)throw new ApiError(400,"This prototype supports up to 100 entries in a list.");
-      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,list_state,created_at,updated_at) VALUES (?,?,?,?,?,1,'active',?,?)").bind(mid,access.dataOwnerId,access.profile.id,JSON.stringify(fields),JSON.stringify(sourceIds),now,now),event(access.dataOwnerId,access.profile.id,mid,"medication_created",1)]);
+      const {terminology,fields:normalizedFields}=normalizeMedicationFields(fields);
+      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,list_state,created_at,updated_at) VALUES (?,?,?,?,?,1,'active',?,?)").bind(mid,access.dataOwnerId,access.profile.id,JSON.stringify(normalizedFields),JSON.stringify(sourceIds),now,now),event(access.dataOwnerId,access.profile.id,mid,"medication_created",1)]);
+      await upsertTerminology(db(),{ownerId:access.dataOwnerId,profileId:access.profile.id,medicationId:mid,terminology,reviewerPrincipalId:principal});
+      await refreshDuplicateFlags(db(),access.dataOwnerId,access.profile.id);
       await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=''").bind(access.dataOwnerId,access.profile.id,principal).run();
-      return json({medication:med((await requireMedication(principal,mid)).row)},201);
+      return json({medication:med((await requireMedication(principal,mid)).row),terminology,duplicateFlags:await listDuplicateFlagsForProfile(db(),access.dataOwnerId,access.profile.id)},201);
     }
     if(req.method==="PUT"&&parts[0]==="medication"&&parts.length===2){
       const {row,access}=await requireMedication(principal,parts[1]);if(row.list_state!=="active")throw new ApiError(409,"This medication is not on the active list. Undo the change first if needed.");
       const b=await body(req),rev=revision(b.revision),fields=validateFields(b.fields);const previous=JSON.parse(row.data);if(previous.sourceDocument){fields.sourceDocument=previous.sourceDocument;fields.sourceDate=previous.sourceDate||"";fields.sourceText=previous.sourceText||"";}fields.adherenceReportedAt=fields.adherence==="not_reported"?"":b.adherenceReviewed===true||fields.adherence!==previous.adherence?new Date().toISOString():(previous.adherenceReportedAt||"");const sourceIds=await sources(access.dataOwnerId,row.profile_id,b.sourceIds||[]);const now=new Date().toISOString();
-      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'").bind(JSON.stringify(fields),JSON.stringify(sourceIds),now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_updated",rev+1).run();
+      const {terminology,fields:normalizedFields}=normalizeMedicationFields(fields);
+      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=? AND list_state='active'").bind(JSON.stringify(normalizedFields),JSON.stringify(sourceIds),now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_updated",rev+1).run();
+      // Identity edits re-run fixture normalization and invalidate prior mapping certainty via fresh terminology row.
+      await upsertTerminology(db(),{ownerId:access.dataOwnerId,profileId:row.profile_id,medicationId:row.id,terminology,reviewerPrincipalId:principal});
+      await refreshDuplicateFlags(db(),access.dataOwnerId,row.profile_id);
       await db().prepare("DELETE FROM editor_drafts WHERE owner_id=? AND profile_id=? AND principal_id=? AND medication_id=?").bind(access.dataOwnerId,row.profile_id,principal,row.id).run();
-      return json({medication:med((await requireMedication(principal,row.id)).row)});
+      return json({medication:med((await requireMedication(principal,row.id)).row),terminology,duplicateFlags:await listDuplicateFlagsForProfile(db(),access.dataOwnerId,row.profile_id)});
     }
     if(req.method==="POST"&&parts[0]==="medication"&&parts[2]==="change"&&parts.length===3){
       const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision),reason=parseChangeReason(b.reason);
@@ -318,6 +464,7 @@ async function handle(req:Request,ctx:Context){
     if(e instanceof ClinicIdentityError)return json({error:e.message},400);
     if(e instanceof MedicationChangeError)return json({error:e.message},400);
     if(e instanceof MedicationValidationError)return json({error:e.message},400);
+    if(e instanceof RxNormError)return json({error:e.message},400);
     return json({error:"The action could not be completed. Please try again. Reload the list before retrying a save."},500);
   }
 }

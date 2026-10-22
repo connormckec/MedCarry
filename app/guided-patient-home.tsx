@@ -5,12 +5,15 @@ import { isConfirmed, type Medication, type MedicationFields } from "@/lib/medic
 import "./patient/patient.css";
 
 type ResumeDraft={id:string;medicationId:string|null;updatedAt:string;draft:{fields:Partial<MedicationFields>&{productName?:string};sourceIds:string[]}};
-type Props={medications:Medication[];loading:boolean;signIn:string;error:string;processing:boolean;finished:boolean;resumeDraft:ResumeDraft|null;onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication)=>void;onResumeDraft:(d:ResumeDraft)=>void;onDone:()=>void;onViewList:()=>void;onChangeList:()=>void};
+type DuplicateFlag={id:string;medicationAId:string;medicationBId:string;flagType:string;explanation:string;status:string};
+type Props={medications:Medication[];loading:boolean;signIn:string;error:string;processing:boolean;finished:boolean;resumeDraft:ResumeDraft|null;duplicateFlags?:DuplicateFlag[];duplicatePrompt?:string;onDuplicateRespond?:(id:string,response:"take_both"|"added_twice"|"unsure")=>void;onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication)=>void;onResumeDraft:(d:ResumeDraft)=>void;onDone:()=>void;onViewList:()=>void;onChangeList:()=>void};
 export default function GuidedPatientHome(p:Props){
   const [adding,setAdding]=useState(false);
   const pending=p.medications.filter(m=>!isConfirmed(m));
+  const openDupes=(p.duplicateFlags||[]).filter(f=>f.status==="open"&&(f.flagType==="possible_duplicate"||f.flagType==="ingredient_overlap"||f.flagType==="different_strength_or_schedule"||f.flagType==="different_formulation_release"));
   useEffect(()=>{setAdding(false);},[p.medications]);
   const capture=!p.finished&&(!p.medications.length||adding);
+  function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` ${m.strength}`:""}`:"Medication";}
   return <main className="patient-home">
     <header className="patient-brand"><span className="brand-icon"><WalletCards size={22}/></span><strong>MedCarry</strong><ShieldCheck size={22}/></header>
     <div className="patient-testing">Test version · Demo records only</div>
@@ -24,6 +27,19 @@ export default function GuidedPatientHome(p:Props){
         <button className="patient-text" onClick={()=>{setAdding(false);p.onChangeList();}}>Add or change a medication</button>
       </>:<>
         {!capture&&p.resumeDraft&&<button className="patient-secondary" disabled={p.processing} onClick={()=>p.onResumeDraft(p.resumeDraft!)}>Continue unfinished medication{p.resumeDraft.draft.fields.productName?`: ${p.resumeDraft.draft.fields.productName}`:""}<ChevronRight size={21}/></button>}
+        {!capture&&openDupes.length>0&&p.onDuplicateRespond&&<div className="patient-duplicate" role="status">
+          <h2>{p.duplicatePrompt||"This may already be on your list."}</h2>
+          {openDupes.slice(0,3).map(flag=><div className="patient-duplicate-card" key={flag.id}>
+            <p><strong>{medLabel(flag.medicationAId)}</strong> and <strong>{medLabel(flag.medicationBId)}</strong></p>
+            <p className="patient-small">{flag.explanation}</p>
+            <div className="patient-duplicate-actions">
+              <button className="patient-secondary" disabled={p.processing} onClick={()=>p.onDuplicateRespond!(flag.id,"take_both")}>I take both</button>
+              <button className="patient-secondary" disabled={p.processing} onClick={()=>p.onDuplicateRespond!(flag.id,"added_twice")}>I added one twice</button>
+              <button className="patient-text" disabled={p.processing} onClick={()=>p.onDuplicateRespond!(flag.id,"unsure")}>I'm not sure</button>
+            </div>
+            <p className="patient-small">Nothing is removed automatically. Both stay on your list until you choose a change.</p>
+          </div>)}
+        </div>}
         <h1>{capture?"Add a medication.":pending.length?"Check your medicines.":"Anything else?"}</h1>
         <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time.":"Include vitamins and supplements."}</p>
         {capture?<div className="patient-capture">

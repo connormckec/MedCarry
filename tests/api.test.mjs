@@ -8,6 +8,8 @@ import * as clinicApi from '../lib/clinic-api.ts';
 import * as clinicIdentity from '../lib/clinic-identity.ts';
 import * as clinicAuthz from '../lib/clinic-authz.ts';
 import * as medicationChanges from '../lib/medication-changes.ts';
+import * as rxnorm from '../lib/rxnorm.ts';
+import * as rxnormStore from '../lib/rxnorm-store.ts';
 import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC,SYNTHETIC_HELPER_PRINCIPAL_ID,SYNTHETIC_PATIENT_PRINCIPAL_ID} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
@@ -48,6 +50,8 @@ function fixture(){
     parseChangeReason:medicationChanges.parseChangeReason,
     parseEditorDraft:medicationChanges.parseEditorDraft,
     SYNTHETIC,
+    ...rxnorm,
+    ...rxnormStore,
   };
   const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
   const values=[{DB,BUCKET},async()=>user,()=>'/signin-with-chatgpt?return_to=%2F',...Object.values(medicationLogic),...Object.values(clinicBindings)];
@@ -260,5 +264,49 @@ test('DELETE medication soft-suppresses instead of erasing history',async()=>{
   assert.equal(r.data.suppressed,true);
   assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);
   assert.equal(f.sqlite.prepare("SELECT list_state s FROM medications").get().s,'suppressed');
+  f.sqlite.close();
+});
+test('RxNorm normalize flags brand/generic duplicates without merging',async()=>{
+  const f=fixture(),p=await setup(f);
+  const brand=await add(f,p,{...valid(),productName:'Eliquis',strength:'5 mg',actualDose:'1',frequency:'twice'});
+  const generic=await add(f,p,{...valid(),productName:'apixaban',strength:'5 mg',actualDose:'1',frequency:'twice'});
+  assert.equal(brand.rxCui,'1364447');
+  assert.equal(generic.rxCui,'1364445');
+  const list=await f.request('list?profile='+p);
+  assert.equal(list.status,200);
+  assert.ok(list.data.terminology.length>=2);
+  const dup=list.data.duplicateFlags.find(d=>d.flagType==='possible_duplicate'&&d.status==='open');
+  assert.ok(dup);
+  assert.match(dup.explanation,/Brand and generic|clinical product/i);
+  assert.equal(list.data.medications.length,2);
+  const responded=await f.request('duplicate-flag/'+dup.id+'/respond','POST',{response:'take_both'});
+  assert.equal(responded.status,200);
+  assert.equal(responded.data.flag.status,'take_both');
+  assert.equal((await f.request('list?profile='+p)).data.medications.length,2);
+  f.sqlite.close();
+});
+test('distinct strength and release cases do not propose possible_duplicate',async()=>{
+  const f=fixture(),p=await setup(f);
+  await add(f,p,{...valid(),productName:'apixaban',strength:'5 mg'});
+  await add(f,p,{...valid(),productName:'apixaban',strength:'2.5 mg'});
+  await add(f,p,{...valid(),productName:'metoprolol tartrate',strength:'50 mg'});
+  await add(f,p,{...valid(),productName:'metoprolol succinate',strength:'50 mg'});
+  const list=await f.request('list?profile='+p);
+  assert.equal(list.data.medications.length,4);
+  assert.equal(list.data.duplicateFlags.some(d=>d.flagType==='possible_duplicate'&&d.status==='open'),false);
+  assert.ok(list.data.duplicateFlags.some(d=>d.flagType==='different_strength_or_schedule'));
+  assert.ok(list.data.duplicateFlags.some(d=>d.flagType==='different_formulation_release'));
+  f.sqlite.close();
+});
+test('manual NLM outage path keeps drafts usable without inventing RxCUI',async()=>{
+  const f=fixture(),p=await setup(f);
+  const m=await add(f,p,{...valid(),productName:'Eliquis',strength:'5 mg'});
+  const outage=await f.request('normalize','POST',{medicationId:m.id,nlmUnavailable:true});
+  assert.equal(outage.status,200);
+  assert.equal(outage.data.terminology.mappingStatus,'unavailable');
+  assert.equal(outage.data.terminology.rxCui,'');
+  assert.equal(outage.data.medication.productName,'Eliquis');
+  const draft=await f.request('draft','PUT',{profileId:p,medicationId:m.id,draft:{fields:{...valid(),productName:'Eliquis',strength:'5 mg'},sourceIds:[]}});
+  assert.equal(draft.status,201);
   f.sqlite.close();
 });

@@ -178,3 +178,72 @@ export const editorDrafts = sqliteTable("editor_drafts", {
   uniqueIndex("editor_draft_unique").on(t.ownerId, t.profileId, t.principalId, t.medicationId),
   index("editor_drafts_principal").on(t.principalId, t.profileId),
 ]);
+
+/**
+ * RxNorm normalization beside the medication row. Original label/source fields stay on medications.data.
+ * mapping_status: unresolved | candidate | confirmed | unmatched | unavailable
+ */
+export const medicationTerminology = sqliteTable("medication_terminology", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  profileId: text("profile_id").notNull().references(() => profiles.id),
+  medicationId: text("medication_id").notNull().references(() => medications.id),
+  originalProductName: text("original_product_name").notNull(),
+  originalStrength: text("original_strength").notNull(),
+  originalFormulation: text("original_formulation").notNull(),
+  queryText: text("query_text").notNull(),
+  rxCui: text("rx_cui").notNull(),
+  referenceName: text("reference_name").notNull(),
+  tty: text("tty").notNull(),
+  clinicalDrugRxCui: text("clinical_drug_rx_cui").notNull(),
+  clinicalDrugName: text("clinical_drug_name").notNull(),
+  ingredientRxCuis: text("ingredient_rx_cuis").notNull(),
+  ingredientNames: text("ingredient_names").notNull(),
+  strengthValue: text("strength_value").notNull(),
+  strengthUnit: text("strength_unit").notNull(),
+  dosageForm: text("dosage_form").notNull(),
+  releaseCharacteristic: text("release_characteristic").notNull(),
+  mappingStatus: text("mapping_status").notNull(),
+  matchMethod: text("match_method").notNull(),
+  terminologyVersion: text("terminology_version").notNull(),
+  terminologyDate: text("terminology_date").notNull(),
+  notesJson: text("notes_json").notNull(),
+  reviewerPrincipalId: text("reviewer_principal_id"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, t => [
+  uniqueIndex("medication_terminology_med").on(t.medicationId),
+  index("medication_terminology_profile").on(t.ownerId, t.profileId),
+]);
+
+/** Non-patient terminology response cache (query hash only — never patient IDs). */
+export const rxnormQueryCache = sqliteTable("rxnorm_query_cache", {
+  queryHash: text("query_hash").primaryKey(),
+  queryText: text("query_text").notNull(),
+  responseJson: text("response_json").notNull(),
+  fetchedAt: text("fetched_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+});
+
+/**
+ * Explainable duplicate / review flags. Never auto-merge or remove medications.
+ * status: open | take_both | added_twice | unsure | staff_dismissed
+ */
+export const duplicateFlags = sqliteTable("duplicate_flags", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  profileId: text("profile_id").notNull().references(() => profiles.id),
+  medicationAId: text("medication_a_id").notNull().references(() => medications.id),
+  medicationBId: text("medication_b_id").notNull().references(() => medications.id),
+  flagType: text("flag_type").notNull(),
+  explanation: text("explanation").notNull(),
+  evidenceJson: text("evidence_json").notNull(),
+  status: text("status").notNull(),
+  respondentPrincipalId: text("respondent_principal_id"),
+  respondedAt: text("responded_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, t => [
+  uniqueIndex("duplicate_flag_pair_type").on(t.profileId, t.medicationAId, t.medicationBId, t.flagType),
+  index("duplicate_flags_profile").on(t.ownerId, t.profileId),
+]);
