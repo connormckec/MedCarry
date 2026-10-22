@@ -10,6 +10,8 @@ import * as clinicAuthz from '../lib/clinic-authz.ts';
 import * as medicationChanges from '../lib/medication-changes.ts';
 import * as rxnorm from '../lib/rxnorm.ts';
 import * as rxnormStore from '../lib/rxnorm-store.ts';
+import * as clinicSubmission from '../lib/clinic-submission.ts';
+import * as clinicSubmissionStore from '../lib/clinic-submission-store.ts';
 import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC,SYNTHETIC_HELPER_PRINCIPAL_ID,SYNTHETIC_PATIENT_PRINCIPAL_ID} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
@@ -52,6 +54,8 @@ function fixture(){
     SYNTHETIC,
     ...rxnorm,
     ...rxnormStore,
+    ...clinicSubmission,
+    ...clinicSubmissionStore,
   };
   const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
   const values=[{DB,BUCKET},async()=>user,()=>'/signin-with-chatgpt?return_to=%2F',...Object.values(medicationLogic),...Object.values(clinicBindings)];
@@ -308,5 +312,76 @@ test('manual NLM outage path keeps drafts usable without inventing RxCUI',async(
   assert.equal(outage.data.medication.productName,'Eliquis');
   const draft=await f.request('draft','PUT',{profileId:p,medicationId:m.id,draft:{fields:{...valid(),productName:'Eliquis',strength:'5 mg'},sourceIds:[]}});
   assert.equal(draft.status,201);
+  f.sqlite.close();
+});
+test('clinic submit is idempotent and creates durable inbox receipt',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const med=await add(f,SYNTHETIC.aliceProfileId,{...valid(),productName:'Eliquis',strength:'5 mg'});
+  await f.request('confirm/'+med.id,'POST',{revision:1,acknowledged:true});
+  const key=crypto.randomUUID();
+  const payload={profileId:SYNTHETIC.aliceProfileId,appointmentId:SYNTHETIC.appointmentAliceA.id,idempotencyKey:key,emptyListAttested:false};
+  const one=await f.request('clinic/submit','POST',payload);
+  assert.equal(one.status,201);
+  assert.equal(one.data.received,true);
+  assert.equal(one.data.submission.deliveryStatus,'received');
+  assert.match(one.data.deliveryLabel,/Received by the clinic/);
+  assert.equal(one.data.receivingClinic,'Innovation Cardiology');
+  const retry=await f.request('clinic/submit','POST',payload);
+  assert.equal(retry.status,200);
+  assert.equal(retry.data.replayed,true);
+  assert.equal(retry.data.submission.id,one.data.submission.id);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM clinic_submissions').get().n,1);
+  assert.equal(f.sqlite.prepare('SELECT count(*) n FROM clinic_inbox_items').get().n,1);
+  const header=await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id);
+  assert.equal(header.data.header.submissionStatus,'received');
+  assert.equal(header.data.header.aprimaStatus,'not_entered');
+  f.sqlite.close();
+});
+test('staff inbox surfaces change and uncertainty counts for the appointment day',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const taking=await add(f,SYNTHETIC.aliceProfileId,{...valid(),productName:'apixaban',strength:'5 mg',status:'taking'});
+  const unsure=await add(f,SYNTHETIC.aliceProfileId,{...valid(),productName:'aspirin',strength:'81 mg',strengthUnknown:true,actualUseUnknown:true,status:'taking'});
+  const stopped=await add(f,SYNTHETIC.aliceProfileId,{...valid(),productName:'Old tablet',strength:'10 mg',status:'stopped',actualDose:'',frequency:'unknown'});
+  await f.request('confirm/'+taking.id,'POST',{revision:1,acknowledged:true});
+  await f.request('confirm/'+unsure.id,'POST',{revision:1,acknowledged:true});
+  await f.request('confirm/'+stopped.id,'POST',{revision:1,acknowledged:true});
+  const submitted=await f.request('clinic/submit','POST',{profileId:SYNTHETIC.aliceProfileId,appointmentId:SYNTHETIC.appointmentAliceA.id,idempotencyKey:crypto.randomUUID()});
+  assert.equal(submitted.status,201);
+  const inbox=await f.request('clinic/inbox?date=2026-11-03');
+  assert.equal(inbox.status,200);
+  assert.equal(inbox.data.appointments.length,1);
+  const row=inbox.data.appointments[0];
+  assert.equal(row.patientLegalName,'Alice Example');
+  assert.equal(row.queue.submissionStatus,'received');
+  assert.ok(row.queue.changeCounts.uncertain>=1);
+  assert.ok(row.queue.changeCounts.stopped>=1);
+  assert.equal(row.detail.patientPostalCode,'02115');
+  const detail=await f.request('clinic/submission/'+submitted.data.submission.id);
+  assert.equal(detail.status,200);
+  assert.ok(detail.data.submission.changeSummary.uncertain.length>=1);
+  const reviewed=await f.request('clinic/submission/'+submitted.data.submission.id+'/review','POST',{staffStatus:'reviewed'});
+  assert.equal(reviewed.status,200);
+  assert.equal(reviewed.data.submission.staffStatus,'reviewed');
+  const aprima=await f.request('clinic/submission/'+submitted.data.submission.id+'/aprima','POST',{aprimaStatus:'entered_manually'});
+  assert.equal(aprima.data.submission.aprimaStatus,'entered_manually');
+  f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test'});
+  assert.equal((await f.request('clinic/inbox?date=2026-11-03')).status,403);
+  f.sqlite.close();
+});
+test('empty-list attestation submits without medications and remains immutable',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const denied=await f.request('clinic/submit','POST',{profileId:SYNTHETIC.aliceProfileId,appointmentId:SYNTHETIC.appointmentAliceA.id,idempotencyKey:crypto.randomUUID(),emptyListAttested:false});
+  assert.equal(denied.status,400);
+  const ok=await f.request('clinic/submit','POST',{profileId:SYNTHETIC.aliceProfileId,appointmentId:SYNTHETIC.appointmentAliceA.id,idempotencyKey:crypto.randomUUID(),emptyListAttested:true});
+  assert.equal(ok.status,201);
+  assert.equal(ok.data.submission.emptyListAttested,true);
+  assert.equal(ok.data.submission.payload.medications.length,0);
+  assert.equal(ok.data.received,true);
   f.sqlite.close();
 });

@@ -226,6 +226,77 @@ export const rxnormQueryCache = sqliteTable("rxnorm_query_cache", {
 });
 
 /**
+ * Immutable clinic medication submissions. Local snapshots are not clinic delivery.
+ * delivery_status: pending | received — receipt only after durable inbox ack.
+ * staff_status: not_reviewed | needs_clarification | reviewed
+ * aprima_status: not_entered | entered_manually (no write-back)
+ */
+export const clinicSubmissions = sqliteTable("clinic_submissions", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull(),
+  profileId: text("profile_id").notNull().references(() => profiles.id),
+  practiceId: text("practice_id").notNull().references(() => practices.id),
+  patientId: text("patient_id").notNull().references(() => patients.id),
+  appointmentId: text("appointment_id").notNull().references(() => appointments.id),
+  respondentId: text("respondent_id"),
+  recipientClinicName: text("recipient_clinic_name").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  medicationRevisionsJson: text("medication_revisions_json").notNull(),
+  changeSummaryJson: text("change_summary_json").notNull(),
+  emptyListAttested: integer("empty_list_attested").notNull(),
+  deliveryStatus: text("delivery_status").notNull(),
+  staffStatus: text("staff_status").notNull(),
+  aprimaStatus: text("aprima_status").notNull(),
+  submittedAt: text("submitted_at").notNull(),
+  receivedAt: text("received_at"),
+  reviewedAt: text("reviewed_at"),
+  reviewerPrincipalId: text("reviewer_principal_id"),
+  createdAt: text("created_at").notNull(),
+}, t => [
+  uniqueIndex("clinic_submission_request").on(t.ownerId, t.idempotencyKey),
+  index("clinic_submissions_appointment").on(t.appointmentId),
+  index("clinic_submissions_practice").on(t.practiceId, t.submittedAt),
+]);
+
+/** Durable staff inbox item created when the receiving outbox acks a submission. */
+export const clinicInboxItems = sqliteTable("clinic_inbox_items", {
+  id: text("id").primaryKey(),
+  practiceId: text("practice_id").notNull().references(() => practices.id),
+  submissionId: text("submission_id").notNull().references(() => clinicSubmissions.id),
+  appointmentId: text("appointment_id").notNull().references(() => appointments.id),
+  patientId: text("patient_id").notNull().references(() => patients.id),
+  appointmentStartsAt: text("appointment_starts_at").notNull(),
+  appointmentTimezone: text("appointment_timezone").notNull(),
+  patientLegalName: text("patient_legal_name").notNull(),
+  patientDob: text("patient_dob").notNull(),
+  deliveryStatus: text("delivery_status").notNull(),
+  staffStatus: text("staff_status").notNull(),
+  aprimaStatus: text("aprima_status").notNull(),
+  summaryJson: text("summary_json").notNull(),
+  createdAt: text("created_at").notNull(),
+}, t => [
+  uniqueIndex("clinic_inbox_submission").on(t.submissionId),
+  index("clinic_inbox_practice_starts").on(t.practiceId, t.appointmentStartsAt),
+]);
+
+/** Idempotent outbox for durable clinic receive/ack (not fee-ticket, not SMS). */
+export const submissionOutbox = sqliteTable("submission_outbox", {
+  id: text("id").primaryKey(),
+  submissionId: text("submission_id").notNull().references(() => clinicSubmissions.id),
+  idempotencyKey: text("idempotency_key").notNull(),
+  /** pending | acked */
+  status: text("status").notNull(),
+  attempts: integer("attempts").notNull(),
+  lastError: text("last_error"),
+  createdAt: text("created_at").notNull(),
+  ackedAt: text("acked_at"),
+}, t => [
+  uniqueIndex("submission_outbox_key").on(t.idempotencyKey),
+  index("submission_outbox_status").on(t.status, t.createdAt),
+]);
+
+/**
  * Explainable duplicate / review flags. Never auto-merge or remove medications.
  * status: open | take_both | added_twice | unsure | staff_dismissed
  */

@@ -33,6 +33,27 @@ import {
   duplicateFlagFromRow,
   type DuplicateFlagRow,
 } from "@/lib/rxnorm-store";
+import {
+  ClinicSubmissionError,
+  RECEIVING_CLINIC_NAME,
+  assertCanSubmitClinic,
+  deliveryLabel,
+  isValidDateOnly,
+  parseAprimaStatus,
+  parseStaffReviewStatus,
+} from "@/lib/clinic-submission";
+import {
+  createImmutableSubmission,
+  inboxItemFromRow,
+  latestSubmissionForAppointment,
+  listInboxForPracticeDate,
+  processSubmissionOutbox,
+  submissionFromRow,
+  updateSubmissionAprimaStatus,
+  updateSubmissionStaffStatus,
+  type ClinicInboxRow,
+  type ClinicSubmissionRow,
+} from "@/lib/clinic-submission-store";
 
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
@@ -454,7 +475,187 @@ async function handle(req:Request,ctx:Context){
       if(!snap)throw new ApiError(404,"This card was not found.");
       const access=await authorizeProfileAccess(db(),principal,snap.profile_id);
       if(snap.owner_id!==access.dataOwnerId)throw new ApiError(404,"This card was not found.");
-      return json({card:JSON.parse(snap.data)});
+      return json({card:JSON.parse(snap.data),note:"Local snapshot only — not clinic delivery."});
+    }
+    if(req.method==="POST"&&route==="clinic/submit"){
+      const b=await body(req),access=await requireProfile(principal,b.profileId);
+      const emptyListAttested=b.emptyListAttested===true;
+      const key=id(b.idempotencyKey);
+      const link=await db().prepare("SELECT patient_id FROM profile_patient_links WHERE profile_id=?").bind(access.profile.id).first<{patient_id:string}>();
+      if(!link)throw new ApiError(400,"This list is not linked to a clinic patient. Link the list before sending to the clinic.");
+      const patient=await db().prepare("SELECT id,practice_id,legal_name,dob,postal_code FROM patients WHERE id=?").bind(link.patient_id).first<{id:string;practice_id:string;legal_name:string;dob:string;postal_code:string|null}>();
+      if(!patient)throw new ApiError(404,"Linked patient was not found.");
+      const practice=await db().prepare("SELECT id,name FROM practices WHERE id=?").bind(patient.practice_id).first<{id:string;name:string}>();
+      if(!practice)throw new ApiError(404,"Practice was not found.");
+      let appointmentId=typeof b.appointmentId==="string"&&b.appointmentId?id(b.appointmentId):"";
+      if(!appointmentId){
+        const next=await db().prepare("SELECT id FROM appointments WHERE patient_id=? AND practice_id=? ORDER BY starts_at DESC LIMIT 1").bind(patient.id,practice.id).first<{id:string}>();
+        if(!next)throw new ApiError(400,"No appointment is available for this patient. Clinic delivery requires an appointment.");
+        appointmentId=next.id;
+      }
+      const appointment=await db().prepare("SELECT id,practice_id,patient_id,provider_name,service_name,starts_at,timezone,revision FROM appointments WHERE id=?").bind(appointmentId).first<{id:string;practice_id:string;patient_id:string;provider_name:string;service_name:string;starts_at:string;timezone:string;revision:number}>();
+      if(!appointment||appointment.patient_id!==patient.id||appointment.practice_id!==practice.id)throw new ApiError(404,"This appointment was not found for the linked patient.");
+      let respondentId:string|null=typeof b.respondentId==="string"&&b.respondentId?id(b.respondentId):null;
+      if(!respondentId){
+        const self=await db().prepare("SELECT id FROM respondents WHERE patient_id=? AND practice_id=? AND principal_id=? AND authorization_status='active' LIMIT 1").bind(patient.id,practice.id,principal).first<{id:string}>();
+        respondentId=self?.id||null;
+        if(!respondentId){
+          const fallback=await db().prepare("SELECT id FROM respondents WHERE patient_id=? AND practice_id=? AND completion_role='patient' AND authorization_status='active' ORDER BY created_at LIMIT 1").bind(patient.id,practice.id).first<{id:string}>();
+          respondentId=fallback?.id||null;
+        }
+      } else {
+        const respondent=await db().prepare("SELECT id FROM respondents WHERE id=? AND patient_id=? AND practice_id=? AND authorization_status='active'").bind(respondentId,patient.id,practice.id).first();
+        if(!respondent)throw new ApiError(404,"This respondent was not found or is not authorized.");
+      }
+      const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' ORDER BY created_at LIMIT 100").bind(access.dataOwnerId,access.profile.id).all<Row>();
+      const list=rows.results.map(med);
+      assertCanSubmitClinic(list,emptyListAttested);
+      if(!emptyListAttested)for(const m of list)validateFields(m,true);
+      const flags=await listDuplicateFlagsForProfile(db(),access.dataOwnerId,access.profile.id);
+      const exact=JSON.stringify(list.map(m=>({id:m.id,revision:m.revision})));
+      // Concurrency gate: active list must still match confirmed revisions at submit time.
+      if(!emptyListAttested){
+        const gate=await db().prepare(`SELECT COUNT(*) AS n FROM medications AS m WHERE owner_id=? AND profile_id=? AND list_state='active' AND (confirmed_revision IS NULL OR confirmed_revision!=revision OR confirmed_at IS NULL OR NOT EXISTS (SELECT 1 FROM json_each(?) AS expected WHERE json_extract(expected.value,'$.id')=m.id AND json_extract(expected.value,'$.revision')=m.revision))`).bind(access.dataOwnerId,access.profile.id,exact).first<{n:number}>();
+        if((gate?.n||0)>0)throw new ApiError(409,"The list changed. Confirm the latest entries before sending to the clinic.");
+        const countGate=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active'").bind(access.dataOwnerId,access.profile.id).first<{n:number}>();
+        if((countGate?.n||0)!==list.length)throw new ApiError(409,"The list changed. Confirm the latest entries before sending to the clinic.");
+      }
+      const respondentRow=respondentId?await db().prepare("SELECT id,display_name,relationship,completion_role FROM respondents WHERE id=?").bind(respondentId).first<{id:string;display_name:string;relationship:string;completion_role:string}>():null;
+      const identity={
+        practice:{id:practice.id,name:practice.name},
+        patient:{id:patient.id,legalName:patient.legal_name,dob:patient.dob,postalCode:patient.postal_code},
+        appointment:{id:appointment.id,providerName:appointment.provider_name,serviceName:appointment.service_name,startsAt:appointment.starts_at,timezone:appointment.timezone,revision:appointment.revision},
+        respondent:respondentRow?{id:respondentRow.id,displayName:respondentRow.display_name,relationship:respondentRow.relationship,completionRole:respondentRow.completion_role}:null,
+        receivingClinic:RECEIVING_CLINIC_NAME,
+      };
+      let created;
+      try{
+        created=await createImmutableSubmission(db(),{
+          ownerId:access.dataOwnerId,
+          profileId:access.profile.id,
+          practiceId:practice.id,
+          patientId:patient.id,
+          appointmentId:appointment.id,
+          respondentId,
+          idempotencyKey:key,
+          medications:list,
+          emptyListAttested,
+          duplicateFlags:flags.map(f=>({id:f.id,flagType:f.flagType,explanation:f.explanation,status:f.status,medicationAId:f.medicationAId,medicationBId:f.medicationBId})),
+          identity,
+        });
+      }catch(e){
+        if(e instanceof Error && e.message==="SUBMISSION_IDEMPOTENCY_CONFLICT")throw new ApiError(409,"This submit request changed. Start a new send.");
+        throw e;
+      }
+      // Durable receive: outbox → clinic inbox ack (not a local snapshot; not Aprima write-back).
+      const ack=await processSubmissionOutbox(db(),created.submission.id);
+      const row=await db().prepare("SELECT * FROM clinic_submissions WHERE id=?").bind(created.submission.id).first<ClinicSubmissionRow>();
+      const submission=submissionFromRow(row!);
+      await event(access.dataOwnerId,access.profile.id,submission.id,created.replayed?"clinic_submission_replayed":"clinic_submission_created").run();
+      return json({
+        submission,
+        received:ack.received,
+        deliveryLabel:deliveryLabel(submission.deliveryStatus),
+        receivingClinic:RECEIVING_CLINIC_NAME,
+        replayed:created.replayed,
+        note:submission.deliveryStatus==="received"
+          ?"Received by the clinic. Staff review and Aprima entry are separate steps."
+          :"Submitted. Waiting for durable clinic receipt — a local snapshot is not delivery.",
+      },created.replayed?200:201);
+    }
+    if(req.method==="GET"&&route==="clinic/inbox"){
+      await assertStaffToolsAllowed(db(),principal);
+      const date=text(url.searchParams.get("date")||"",10,true);
+      if(!isValidDateOnly(date))throw new ApiError(400,"Use a valid appointment date (YYYY-MM-DD).");
+      const practiceId=url.searchParams.get("practiceId")?id(url.searchParams.get("practiceId")):SYNTHETIC.practiceId;
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,principal).first();
+      if(!membership)throw new ApiError(403,"Staff access is required for the clinic inbox.");
+      const inbox=await listInboxForPracticeDate(db(),practiceId,date);
+      return json({
+        date,
+        practiceId,
+        receivingClinic:RECEIVING_CLINIC_NAME,
+        appointments:inbox.appointments.map(a=>({
+          ...a,
+          queue:{
+            patientLegalName:a.patientLegalName,
+            patientDob:a.patientDob,
+            appointmentStartsAt:a.startsAt,
+            submissionStatus:a.submission
+              ?a.submission.staffStatus==="reviewed"?"reviewed":a.submission.deliveryStatus==="received"?"received":"submitted_pending_receipt"
+              :"not_started",
+            changeCounts:a.submission?.changeSummary.counts||{added:0,stopped:0,changed:0,duplicate:0,uncertain:0},
+          },
+          detail:{
+            patientPostalCode:a.patientPostalCode,
+            respondentId:a.submission?.respondentId||null,
+            aprimaStatus:a.submission?.aprimaStatus||"not_entered",
+          },
+        })),
+        note:"Primary action is Review on a received submission. ZIP and respondent stay in expanded detail.",
+      });
+    }
+    if(req.method==="GET"&&parts[0]==="clinic"&&parts[1]==="submission"&&parts.length===3){
+      const submissionId=id(parts[2]);
+      const row=await db().prepare("SELECT * FROM clinic_submissions WHERE id=?").bind(submissionId).first<ClinicSubmissionRow>();
+      if(!row)throw new ApiError(404,"This submission was not found.");
+      let allowed=false;
+      try{
+        const access=await authorizeProfileAccess(db(),principal,row.profile_id);
+        if(row.owner_id===access.dataOwnerId)allowed=true;
+      }catch{
+        /* staff path below */
+      }
+      if(!allowed){
+        await assertStaffToolsAllowed(db(),principal);
+        const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(row.practice_id,principal).first();
+        if(!membership)throw new ApiError(403,"Staff access is required.");
+        allowed=true;
+      }
+      if(!allowed)throw new ApiError(404,"This submission was not found.");
+      const inbox=await db().prepare("SELECT * FROM clinic_inbox_items WHERE submission_id=?").bind(submissionId).first<ClinicInboxRow>();
+      const patient=await db().prepare("SELECT legal_name,dob,postal_code FROM patients WHERE id=?").bind(row.patient_id).first<{legal_name:string;dob:string;postal_code:string|null}>();
+      const respondent=row.respondent_id?await db().prepare("SELECT id,display_name,relationship,completion_role FROM respondents WHERE id=?").bind(row.respondent_id).first():null;
+      return json({
+        submission:submissionFromRow(row),
+        inboxItem:inbox?inboxItemFromRow(inbox):null,
+        deliveryLabel:deliveryLabel(row.delivery_status as "pending"|"received"),
+        patient:patient?{legalName:patient.legal_name,dob:patient.dob,postalCode:patient.postal_code}:null,
+        respondent,
+        receivingClinic:row.recipient_clinic_name,
+      });
+    }
+    if(req.method==="POST"&&parts[0]==="clinic"&&parts[1]==="submission"&&parts[3]==="review"&&parts.length===4){
+      await assertStaffToolsAllowed(db(),principal);
+      const submissionId=id(parts[2]);const b=await body(req);const staffStatus=parseStaffReviewStatus(b.staffStatus);
+      const row=await db().prepare("SELECT * FROM clinic_submissions WHERE id=?").bind(submissionId).first<ClinicSubmissionRow>();
+      if(!row)throw new ApiError(404,"This submission was not found.");
+      if(row.delivery_status!=="received")throw new ApiError(409,"Review is available only after the clinic has received the submission.");
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(row.practice_id,principal).first();
+      if(!membership)throw new ApiError(403,"Staff access is required.");
+      const updated=await updateSubmissionStaffStatus(db(),submissionId,row.practice_id,staffStatus,principal);
+      return json({submission:submissionFromRow(updated!),note:"Staff review is separate from Aprima entry and from patient confirmation."});
+    }
+    if(req.method==="POST"&&parts[0]==="clinic"&&parts[1]==="submission"&&parts[3]==="aprima"&&parts.length===4){
+      await assertStaffToolsAllowed(db(),principal);
+      const submissionId=id(parts[2]);const b=await body(req);const aprimaStatus=parseAprimaStatus(b.aprimaStatus);
+      const row=await db().prepare("SELECT * FROM clinic_submissions WHERE id=?").bind(submissionId).first<ClinicSubmissionRow>();
+      if(!row)throw new ApiError(404,"This submission was not found.");
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(row.practice_id,principal).first();
+      if(!membership)throw new ApiError(403,"Staff access is required.");
+      const updated=await updateSubmissionAprimaStatus(db(),submissionId,row.practice_id,aprimaStatus);
+      return json({submission:submissionFromRow(updated!),note:"Aprima handling is tracked as not entered or entered manually. There is no write-back."});
+    }
+    if(req.method==="GET"&&route==="clinic/submission-status"){
+      const access=await requireProfile(principal,url.searchParams.get("profile"));
+      const appointmentId=url.searchParams.get("appointment")?id(url.searchParams.get("appointment")):"";
+      let row:ClinicSubmissionRow|null=null;
+      if(appointmentId)row=await latestSubmissionForAppointment(db(),appointmentId);
+      else {
+        row=await db().prepare("SELECT * FROM clinic_submissions WHERE owner_id=? AND profile_id=? ORDER BY submitted_at DESC LIMIT 1").bind(access.dataOwnerId,access.profile.id).first<ClinicSubmissionRow>();
+      }
+      if(!row||row.owner_id!==access.dataOwnerId)return json({submission:null,deliveryLabel:null,receivingClinic:RECEIVING_CLINIC_NAME});
+      return json({submission:submissionFromRow(row),deliveryLabel:deliveryLabel(row.delivery_status as "pending"|"received"),receivingClinic:row.recipient_clinic_name});
     }
     throw new ApiError(404,"This action was not found.");
   } catch(e){
@@ -465,6 +666,7 @@ async function handle(req:Request,ctx:Context){
     if(e instanceof MedicationChangeError)return json({error:e.message},400);
     if(e instanceof MedicationValidationError)return json({error:e.message},400);
     if(e instanceof RxNormError)return json({error:e.message},400);
+    if(e instanceof ClinicSubmissionError)return json({error:e.message},400);
     return json({error:"The action could not be completed. Please try again. Reload the list before retrying a save."},500);
   }
 }

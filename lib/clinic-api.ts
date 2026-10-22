@@ -352,7 +352,28 @@ export async function getStaffIdentityHeader(
         }
       : null,
     matchingStatus: buildMatchingStatus(mappingView),
-    submissionStatus: "not_started",
-    baselineStatus: "none",
+    ...(await resolveSubmissionHeader(db, appointment.id)),
+    baselineStatus: "none" as const,
   };
+}
+
+async function resolveSubmissionHeader(
+  db: D1Database,
+  appointmentId: string,
+): Promise<{
+  submissionStatus: StaffIdentityHeader["submissionStatus"];
+  aprimaStatus: StaffIdentityHeader["aprimaStatus"];
+}> {
+  const row = await db
+    .prepare(
+      "SELECT delivery_status, staff_status, aprima_status FROM clinic_submissions WHERE appointment_id=? ORDER BY submitted_at DESC LIMIT 1",
+    )
+    .bind(appointmentId)
+    .first<{ delivery_status: string; staff_status: string; aprima_status: string }>();
+  if (!row) return { submissionStatus: "not_started", aprimaStatus: "not_entered" };
+  const aprimaStatus =
+    row.aprima_status === "entered_manually" ? ("entered_manually" as const) : ("not_entered" as const);
+  if (row.staff_status === "reviewed") return { submissionStatus: "reviewed", aprimaStatus };
+  if (row.delivery_status === "received") return { submissionStatus: "received", aprimaStatus };
+  return { submissionStatus: "submitted_pending_receipt", aprimaStatus };
 }

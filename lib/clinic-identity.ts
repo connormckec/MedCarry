@@ -179,8 +179,14 @@ export type StaffIdentityHeader = {
     authorizationStatus: AuthorizationStatus;
   } | null;
   matchingStatus: "unverified_mapping" | "verified_mapping" | "needs_review" | "no_external_mapping";
-  /** Explicitly not clinic delivery or staff reconciliation. */
-  submissionStatus: "not_started";
+  /**
+   * Patient/clinic delivery view for this appointment.
+   * not_started | submitted_pending_receipt | received | reviewed
+   * Local snapshots alone never count as received.
+   */
+  submissionStatus: "not_started" | "submitted_pending_receipt" | "received" | "reviewed";
+  /** Aprima handling — no write-back in MVP. */
+  aprimaStatus: "not_entered" | "entered_manually";
   baselineStatus: "none";
 };
 
