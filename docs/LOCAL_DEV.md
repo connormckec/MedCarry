@@ -64,12 +64,22 @@ Fictional Innovation Cardiology records (not real PHI):
 
 That calls:
 
-- `POST /api/clinic/seed-synthetic` — allowed only for principal `local_seedy`
+- `POST /api/clinic/seed-synthetic` — allowed only for principal `local_seedy` (and blocked for patient/helper sessions)
 - `GET /api/clinic/staff-header?appointment=<synthetic-id>`
 
 Also available:
 
 - `POST /api/clinic/match-proposal` — staff-only; proposes matches, never auto-merges
+
+Seed also creates a **linked** medication profile for Alice (`SYNTHETIC.aliceProfileId`) and binds test principals:
+
+| Principal | Role |
+| --- | --- |
+| `local_seedy` | Staff (loopback mock) |
+| `local_patient_alice` | Active patient respondent (API tests) |
+| `local_helper_dana` | Active helper respondent (API tests) |
+
+Authorization is server-enforced: practice staff membership or an **active** respondent binding. Patient/helper sessions cannot call profile create, note import, NLM search, or clinic staff tools. `X-Medcarry-View` never grants privileges. Unlinked legacy profiles remain owner-only.
 
 Fixture IDs and sample demographics: `lib/synthetic-clinic.ts`.
 

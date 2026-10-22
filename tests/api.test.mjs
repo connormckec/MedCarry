@@ -6,7 +6,8 @@ import ts from 'typescript';
 import * as medicationLogic from '../lib/medication.ts';
 import * as clinicApi from '../lib/clinic-api.ts';
 import * as clinicIdentity from '../lib/clinic-identity.ts';
-import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC} from '../lib/synthetic-clinic.ts';
+import * as clinicAuthz from '../lib/clinic-authz.ts';
+import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC,SYNTHETIC_HELPER_PRINCIPAL_ID,SYNTHETIC_PATIENT_PRINCIPAL_ID} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
 const migrations=new URL('../drizzle/',import.meta.url);
@@ -37,6 +38,11 @@ function fixture(){
     getStaffIdentityHeader:clinicApi.getStaffIdentityHeader,
     ClinicIdentityError:clinicIdentity.ClinicIdentityError,
     proposePatientMatch:clinicIdentity.proposePatientMatch,
+    AuthzError:clinicAuthz.AuthzError,
+    assertStaffToolsAllowed:clinicAuthz.assertStaffToolsAllowed,
+    authorizeProfileAccess:clinicAuthz.authorizeProfileAccess,
+    authorizeUploadAccess:clinicAuthz.authorizeUploadAccess,
+    listAccessibleProfiles:clinicAuthz.listAccessibleProfiles,
     SYNTHETIC,
   };
   const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
@@ -118,5 +124,84 @@ test('match proposal is staff-only and does not auto-attach on name alone',async
   assert.equal(ambiguous.data.proposal.status,'ambiguous');
   f.setUser({userId:'stranger',email:'stranger@example.test'});
   assert.equal((await f.request('clinic/match-proposal','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Alice Example',dob:'1948-03-12'})).status,403);
+  f.sqlite.close();
+});
+test('patient sessions cannot use staff import, list create, search, or clinic tools',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test',fullName:'Alice Example'});
+  assert.equal((await f.request('profile','POST',{name:'Hijack list'})).status,403);
+  assert.equal((await f.request('note-import','POST',{profileId:SYNTHETIC.aliceProfileId,sourceDocument:'x',reviewed:true,idempotencyKey:crypto.randomUUID(),rows:[{...valid(),sourceText:'Fictional tablet 25 mg'}]})).status,403);
+  assert.equal((await f.request('search?q=metoprolol')).status,403);
+  assert.equal((await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id)).status,403);
+  assert.equal((await f.request('clinic/seed-synthetic','POST',{})).status,403);
+  f.sqlite.close();
+});
+test('authorized patient can read and mutate their linked list but not another patient photo',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const png=new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0]);
+  const up=await f.request('upload?profile='+SYNTHETIC.aliceProfileId,'POST',png,{'Content-Type':'image/png'});
+  assert.equal(up.status,201);
+  const med=await f.request('medication','POST',{profileId:SYNTHETIC.aliceProfileId,fields:valid(),sourceIds:[up.data.id]});
+  assert.equal(med.status,201);
+  f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test',fullName:'Alice Example'});
+  const list=await f.request('list?profile='+SYNTHETIC.aliceProfileId);
+  assert.equal(list.status,200);
+  assert.equal(list.data.access.actor,'patient');
+  assert.equal((await f.request('upload/'+up.data.id)).status,200);
+  const edited=await f.request('medication/'+med.data.medication.id,'PUT',{revision:1,sourceIds:[up.data.id],fields:{...valid(),actualDose:'1/2'}});
+  assert.equal(edited.status,200);
+  assert.equal(edited.data.medication.confirmedRevision,null);
+  // Second linked patient list for Bob — patient Alice must not read it
+  const now=new Date().toISOString();
+  f.sqlite.prepare('INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)').run('a7777777-7777-4777-8777-777777777702',LOCAL_MOCK_PRINCIPAL_ID,'Bob list',now);
+  f.sqlite.prepare('INSERT INTO profile_patient_links (id,profile_id,patient_id,linked_by,created_at) VALUES (?,?,?,?,?)').run('a8888888-8888-4888-8888-888888888802','a7777777-7777-4777-8777-777777777702',SYNTHETIC.patients.bob.id,'test',now);
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  const bobPhoto=await f.request('upload?profile=a7777777-7777-4777-8777-777777777702','POST',png,{'Content-Type':'image/png'});
+  assert.equal(bobPhoto.status,201);
+  f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test',fullName:'Alice Example'});
+  assert.equal((await f.request('list?profile=a7777777-7777-4777-8777-777777777702')).status,404);
+  assert.equal((await f.request('upload/'+bobPhoto.data.id)).status,404);
+  f.sqlite.close();
+});
+test('helper access is distinct and revoked authorization stops photo reads',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const png=new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0]);
+  const up=await f.request('upload?profile='+SYNTHETIC.aliceProfileId,'POST',png,{'Content-Type':'image/png'});
+  f.setUser({userId:SYNTHETIC_HELPER_PRINCIPAL_ID,email:'dana@example.test',fullName:'Dana Example'});
+  const list=await f.request('list?profile='+SYNTHETIC.aliceProfileId);
+  assert.equal(list.status,200);
+  assert.equal(list.data.access.actor,'helper');
+  assert.equal((await f.request('upload/'+up.data.id)).status,200);
+  assert.equal((await f.request('note-import','POST',{profileId:SYNTHETIC.aliceProfileId,sourceDocument:'x',reviewed:true,idempotencyKey:crypto.randomUUID(),rows:[{...valid(),sourceText:'line'}]})).status,403);
+  f.sqlite.prepare("UPDATE respondents SET authorization_status='revoked' WHERE id=?").run(SYNTHETIC.respondentHelper.id);
+  assert.equal((await f.request('upload/'+up.data.id)).status,403);
+  assert.equal((await f.request('list?profile='+SYNTHETIC.aliceProfileId)).status,403);
+  f.sqlite.close();
+});
+test('cross-clinic staff membership cannot open another practice linked list',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const now=new Date().toISOString();
+  f.sqlite.prepare('INSERT INTO practices (id,name,created_at) VALUES (?,?,?)').run(SYNTHETIC.otherPracticeId,'Other Clinic',now);
+  f.sqlite.prepare('INSERT INTO staff_memberships (id,practice_id,principal_id,role,created_at) VALUES (?,?,?,?,?)').run(crypto.randomUUID(),SYNTHETIC.otherPracticeId,'other_staff','staff',now);
+  f.setUser({userId:'other_staff',email:'other@example.test',fullName:'Other Staff'});
+  assert.equal((await f.request('list?profile='+SYNTHETIC.aliceProfileId)).status,404);
+  assert.equal((await f.request('clinic/staff-header?appointment='+SYNTHETIC.appointmentAliceA.id)).status,403);
+  f.sqlite.close();
+});
+test('client view header cannot escalate a patient into staff tools',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  f.setUser({userId:SYNTHETIC_PATIENT_PRINCIPAL_ID,email:'alice@example.test',fullName:'Alice Example'});
+  assert.equal((await f.request('profile','POST',{name:'x'},{'X-Medcarry-View':'staff'})).status,403);
+  assert.equal((await f.request('search?q=aspirin', 'GET', undefined, {'X-Medcarry-View':'staff'})).status,403);
   f.sqlite.close();
 });

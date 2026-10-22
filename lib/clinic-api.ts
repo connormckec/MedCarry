@@ -6,7 +6,12 @@ import {
   type StaffIdentityHeader,
   type VerificationStatus,
 } from "./clinic-identity.ts";
-import { LOCAL_MOCK_PRINCIPAL_ID, SYNTHETIC } from "./synthetic-clinic.ts";
+import {
+  LOCAL_MOCK_PRINCIPAL_ID,
+  SYNTHETIC,
+  SYNTHETIC_HELPER_PRINCIPAL_ID,
+  SYNTHETIC_PATIENT_PRINCIPAL_ID,
+} from "./synthetic-clinic.ts";
 
 export class ClinicApiError extends Error {
   status: number;
@@ -60,23 +65,18 @@ export async function ensureSyntheticClinic(
     .prepare("SELECT id FROM practices WHERE id=?")
     .bind(SYNTHETIC.practiceId)
     .first<{ id: string }>();
+  const now = new Date().toISOString();
   if (existing) {
     await db
       .prepare(
         "INSERT OR IGNORE INTO staff_memberships (id,practice_id,principal_id,role,created_at) VALUES (?,?,?,?,?)",
       )
-      .bind(
-        crypto.randomUUID(),
-        SYNTHETIC.practiceId,
-        principalId,
-        "staff",
-        new Date().toISOString(),
-      )
+      .bind(crypto.randomUUID(), SYNTHETIC.practiceId, principalId, "staff", now)
       .run();
+    await ensureLinkedAliceProfile(db, principalId, now);
     return { seeded: false, appointmentId: SYNTHETIC.appointmentAliceA.id };
   }
 
-  const now = new Date().toISOString();
   const { patients, mappingAliceA, appointmentAliceA, respondentSelf, respondentHelper } = SYNTHETIC;
   await db.batch([
     db.prepare("INSERT INTO practices (id,name,created_at) VALUES (?,?,?)").bind(
@@ -172,7 +172,7 @@ export async function ensureSyntheticClinic(
         respondentSelf.relationship,
         respondentSelf.completionRole,
         respondentSelf.authorizationStatus,
-        null,
+        SYNTHETIC_PATIENT_PRINCIPAL_ID,
         now,
       ),
     db
@@ -187,11 +187,56 @@ export async function ensureSyntheticClinic(
         respondentHelper.relationship,
         respondentHelper.completionRole,
         respondentHelper.authorizationStatus,
-        null,
+        SYNTHETIC_HELPER_PRINCIPAL_ID,
+        now,
+      ),
+    db
+      .prepare("INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)")
+      .bind(SYNTHETIC.aliceProfileId, principalId, "Alice Example — synthetic list", now),
+    db
+      .prepare(
+        "INSERT INTO profile_patient_links (id,profile_id,patient_id,linked_by,created_at) VALUES (?,?,?,?,?)",
+      )
+      .bind(
+        SYNTHETIC.aliceProfileLinkId,
+        SYNTHETIC.aliceProfileId,
+        patients.aliceA.id,
+        "synthetic_fixture",
         now,
       ),
   ]);
   return { seeded: true, appointmentId: SYNTHETIC.appointmentAliceA.id };
+}
+
+async function ensureLinkedAliceProfile(
+  db: D1Database,
+  staffPrincipalId: string,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare("UPDATE respondents SET principal_id=? WHERE id=?")
+    .bind(SYNTHETIC_PATIENT_PRINCIPAL_ID, SYNTHETIC.respondentSelf.id)
+    .run();
+  await db
+    .prepare("UPDATE respondents SET principal_id=? WHERE id=?")
+    .bind(SYNTHETIC_HELPER_PRINCIPAL_ID, SYNTHETIC.respondentHelper.id)
+    .run();
+  await db
+    .prepare("INSERT OR IGNORE INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)")
+    .bind(SYNTHETIC.aliceProfileId, staffPrincipalId, "Alice Example — synthetic list", now)
+    .run();
+  await db
+    .prepare(
+      "INSERT OR IGNORE INTO profile_patient_links (id,profile_id,patient_id,linked_by,created_at) VALUES (?,?,?,?,?)",
+    )
+    .bind(
+      SYNTHETIC.aliceProfileLinkId,
+      SYNTHETIC.aliceProfileId,
+      SYNTHETIC.patients.aliceA.id,
+      "synthetic_fixture",
+      now,
+    )
+    .run();
 }
 
 export async function getStaffIdentityHeader(

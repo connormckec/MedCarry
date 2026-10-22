@@ -4,10 +4,17 @@
  */
 
 export const LOCAL_MOCK_PRINCIPAL_ID = "local_seedy";
+/** Test-only patient/helper principals (not Sites mock cookies; used in API tests). */
+export const SYNTHETIC_PATIENT_PRINCIPAL_ID = "local_patient_alice";
+export const SYNTHETIC_HELPER_PRINCIPAL_ID = "local_helper_dana";
 
 export const SYNTHETIC = {
   practiceId: "a1111111-1111-4111-8111-111111111111",
   practiceName: "Innovation Cardiology (synthetic)",
+  /** Second practice for cross-clinic denial tests (created by tests when needed). */
+  otherPracticeId: "a1111111-1111-4111-8111-111111111122",
+  aliceProfileId: "a7777777-7777-4777-8777-777777777701",
+  aliceProfileLinkId: "a8888888-8888-4888-8888-888888888801",
   patients: {
     aliceA: {
       id: "a2222222-2222-4222-8222-222222222201",

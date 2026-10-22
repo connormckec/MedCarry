@@ -3,6 +3,14 @@ import { getChatGPTUser, chatGPTSignInPath } from "@/app/chatgpt-auth";
 import { MedicationValidationError, emptyMedication, validateFields, parseLabel, canCreateCard, type Medication, type MedicationFields } from "@/lib/medication";
 import { ClinicApiError, ensureSyntheticClinic, getStaffIdentityHeader } from "@/lib/clinic-api";
 import { ClinicIdentityError, proposePatientMatch, type PatientRecord } from "@/lib/clinic-identity";
+import {
+  AuthzError,
+  assertStaffToolsAllowed,
+  authorizeProfileAccess,
+  authorizeUploadAccess,
+  listAccessibleProfiles,
+  type ProfileAccess,
+} from "@/lib/clinic-authz";
 import { SYNTHETIC } from "@/lib/synthetic-clinic";
 
 export const dynamic = "force-dynamic";
@@ -23,16 +31,24 @@ async function boundedBytes(req: Request, limit: number) {
   const out=new Uint8Array(size);let offset=0;for(const chunk of chunks){out.set(chunk,offset);offset+=chunk.length;}return out;
 }
 async function body(req: Request,limit=48000): Promise<Record<string,unknown>> { if(!req.headers.get("content-type")?.includes("application/json"))throw new ApiError(415,"Send a JSON request.");try { const value=JSON.parse(new TextDecoder().decode(await boundedBytes(req,limit)));if(!value||typeof value!=="object"||Array.isArray(value))throw new Error();return value; } catch(e) {if(e instanceof ApiError)throw e;throw new ApiError(400,"The request could not be read.");} }
-async function profile(owner: string, value: unknown) { const pid=id(value);const p=await db().prepare("SELECT id,name,created_at FROM profiles WHERE id=? AND owner_id=?").bind(pid,owner).first<{id:string;name:string;created_at:string}>();if(!p)throw new ApiError(404,"This medication list was not found.");return p; }
-async function medication(owner: string,value: unknown) { const row=await db().prepare("SELECT * FROM medications WHERE id=? AND owner_id=?").bind(id(value),owner).first<Row>();if(!row)throw new ApiError(404,"This medication was not found.");return row; }
+async function requireProfile(principal: string, value: unknown): Promise<ProfileAccess> {
+  return authorizeProfileAccess(db(), principal, id(value));
+}
+async function requireMedication(principal: string, value: unknown): Promise<{ row: Row; access: ProfileAccess }> {
+  const row = await db().prepare("SELECT * FROM medications WHERE id=?").bind(id(value)).first<Row>();
+  if (!row) throw new ApiError(404, "This medication was not found.");
+  const access = await authorizeProfileAccess(db(), principal, row.profile_id);
+  if (row.owner_id !== access.dataOwnerId) throw new ApiError(404, "This medication was not found.");
+  return { row, access };
+}
 function event(owner:string,pid:string,entity:string,action:string,revision:number|null=null) { return db().prepare("INSERT INTO audit_events (id,owner_id,profile_id,entity_id,action,revision,created_at) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(),owner,pid,entity,action,revision,new Date().toISOString()); }
-async function sources(owner:string,pid:string,value:unknown) {if(!Array.isArray(value)||value.length>4)throw new ApiError(400,"Use up to four photos for one medication.");const ids=[...new Set(value.map(id))];for(const sid of ids){const found=await db().prepare("SELECT id FROM uploads WHERE id=? AND owner_id=? AND profile_id=?").bind(sid,owner,pid).first();if(!found)throw new ApiError(400,"A source photo does not belong to this list.");}return ids;}
+async function sources(dataOwnerId:string,pid:string,value:unknown) {if(!Array.isArray(value)||value.length>4)throw new ApiError(400,"Use up to four photos for one medication.");const ids=[...new Set(value.map(id))];for(const sid of ids){const found=await db().prepare("SELECT id FROM uploads WHERE id=? AND owner_id=? AND profile_id=?").bind(sid,dataOwnerId,pid).first();if(!found)throw new ApiError(400,"A source photo does not belong to this list.");}return ids;}
 function revision(value:unknown){if(!Number.isInteger(value)||Number(value)<1)throw new ApiError(400,"A current record version is required.");return Number(value);}
 function text(value:unknown,max:number,required=false){if(typeof value!=="string"||value.trim().length>max||(required&&!value.trim()))throw new ApiError(400,"Check the text you entered.");return value.trim();}
 async function handle(req:Request,ctx:Context){
   try {
     const user=await getChatGPTUser();if(!user)return json({error:"Sign in to access your medication list.",signInUrl:chatGPTSignInPath(req.headers.get("x-medcarry-view")==="patient"?"/patient":"/")},401);
-    const owner=user.userId;const parts=(await ctx.params).path;const url=new URL(req.url);const route=parts.join("/");
+    const principal=user.userId;const parts=(await ctx.params).path;const url=new URL(req.url);const route=parts.join("/");
     if(req.method!=="GET"){
       if(req.headers.get("x-medcarry-request")!=="1")throw new ApiError(403,"This action must originate from the app.");
       const origin=req.headers.get("origin");
@@ -40,20 +56,23 @@ async function handle(req:Request,ctx:Context){
       if(!origin && req.headers.get("sec-fetch-site")!=="same-origin")throw new ApiError(403,"The request origin could not be verified.");
     }
     if(req.method==="GET"&&route==="bootstrap"){
-      const ps=await db().prepare("SELECT id,name,created_at FROM profiles WHERE owner_id=? ORDER BY created_at LIMIT 12").bind(owner).all();
-      return json({profiles:ps.results,displayName:user.fullName?.split(" ")[0]||"Your account"});
+      const profiles=await listAccessibleProfiles(db(),principal);
+      return json({profiles,displayName:user.fullName?.split(" ")[0]||"Your account"});
     }
     if(req.method==="POST"&&route==="clinic/seed-synthetic"){
-      const result=await ensureSyntheticClinic(db(),owner);
-      return json({...result,practiceId:SYNTHETIC.practiceId},result.seeded?201:200);
+      await assertStaffToolsAllowed(db(),principal);
+      const result=await ensureSyntheticClinic(db(),principal);
+      return json({...result,practiceId:SYNTHETIC.practiceId,profileId:SYNTHETIC.aliceProfileId},result.seeded?201:200);
     }
     if(req.method==="GET"&&route==="clinic/staff-header"){
-      const header=await getStaffIdentityHeader(db(),owner,url.searchParams.get("appointment"),url.searchParams.get("respondent")||undefined);
+      await assertStaffToolsAllowed(db(),principal);
+      const header=await getStaffIdentityHeader(db(),principal,url.searchParams.get("appointment"),url.searchParams.get("respondent")||undefined);
       return json({header});
     }
     if(req.method==="POST"&&route==="clinic/match-proposal"){
+      await assertStaffToolsAllowed(db(),principal);
       const b=await body(req);const practiceId=id(b.practiceId);
-      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,owner).first();
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,principal).first();
       if(!membership)throw new ApiError(403,"Staff access is required for patient matching.");
       const rows=await db().prepare("SELECT id,practice_id,legal_name,dob,postal_code FROM patients WHERE practice_id=?").bind(practiceId).all<{id:string;practice_id:string;legal_name:string;dob:string;postal_code:string|null}>();
       const patients:PatientRecord[]=rows.results.map(r=>({id:r.id,practiceId:r.practice_id,legalName:r.legal_name,dob:r.dob,postalCode:r.postal_code}));
@@ -69,33 +88,36 @@ async function handle(req:Request,ctx:Context){
       return json({proposal,note:"Matching proposes candidates for staff review. It does not authenticate or attach records."});
     }
     if(req.method==="POST"&&route==="profile"){
-      const b=await body(req);const name=text(b.name,80,true);const count=await db().prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_id=?").bind(owner).first<{n:number}>();if((count?.n||0)>=12)throw new ApiError(400,"You can create up to 12 separate lists.");
-      const pid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)").bind(pid,owner,name,now),event(owner,pid,pid,"profile_created")]);return json({profile:{id:pid,name,created_at:now}},201);
+      await assertStaffToolsAllowed(db(),principal);
+      const b=await body(req);const name=text(b.name,80,true);const count=await db().prepare("SELECT COUNT(*) AS n FROM profiles WHERE owner_id=?").bind(principal).first<{n:number}>();if((count?.n||0)>=12)throw new ApiError(400,"You can create up to 12 separate lists.");
+      const pid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)").bind(pid,principal,name,now),event(principal,pid,pid,"profile_created")]);return json({profile:{id:pid,name,created_at:now}},201);
     }
     if(req.method==="GET"&&route==="list"){
-      const p=await profile(owner,url.searchParams.get("profile"));const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 100").bind(owner,p.id).all<Row>();
-      const cards=await db().prepare("SELECT id,recipient,patient_name,created_at FROM snapshots WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 15").bind(owner,p.id).all();return json({medications:rows.results.map(med),cards:cards.results});
+      const access=await requireProfile(principal,url.searchParams.get("profile"));const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 100").bind(access.dataOwnerId,access.profile.id).all<Row>();
+      const cards=await db().prepare("SELECT id,recipient,patient_name,created_at FROM snapshots WHERE owner_id=? AND profile_id=? ORDER BY created_at DESC LIMIT 15").bind(access.dataOwnerId,access.profile.id).all();return json({medications:rows.results.map(med),cards:cards.results,access:{actor:access.actor,practiceId:access.practiceId,patientId:access.patientId}});
     }
     if(req.method==="POST"&&route==="upload"){
-      const p=await profile(owner,url.searchParams.get("profile"));const bytes=await boundedBytes(req,6*1024*1024);if(bytes.length<12)throw new ApiError(400,"This file is empty or not a supported photo.");
+      const access=await requireProfile(principal,url.searchParams.get("profile"));const bytes=await boundedBytes(req,6*1024*1024);if(bytes.length<12)throw new ApiError(400,"This file is empty or not a supported photo.");
       let mime="";if(bytes[0]===0xff&&bytes[1]===0xd8&&bytes[2]===0xff)mime="image/jpeg";
       if([137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v))mime="image/png";
       if(new TextDecoder().decode(bytes.slice(0,4))==="RIFF"&&new TextDecoder().decode(bytes.slice(8,12))==="WEBP")mime="image/webp";
       if(!mime)throw new ApiError(415,"Use a JPG, PNG, or WebP photo. You can also use manual entry.");
-      const count=await db().prepare("SELECT COUNT(*) AS n FROM uploads WHERE owner_id=?").bind(owner).first<{n:number}>();if((count?.n||0)>=400)throw new ApiError(400,"This prototype has reached its photo limit.");
-      const uid=crypto.randomUUID(),key=`${owner}/${p.id}/${uid}`,now=new Date().toISOString();await bucket().put(key,bytes,{httpMetadata:{contentType:mime}});
-      try {await db().batch([db().prepare("INSERT INTO uploads (id,owner_id,profile_id,object_key,mime_type,size,created_at) VALUES (?,?,?,?,?,?,?)").bind(uid,owner,p.id,key,mime,bytes.length,now),event(owner,p.id,uid,"photo_uploaded")]);}catch(e){await bucket().delete(key);throw e;}
+      const count=await db().prepare("SELECT COUNT(*) AS n FROM uploads WHERE owner_id=?").bind(access.dataOwnerId).first<{n:number}>();if((count?.n||0)>=400)throw new ApiError(400,"This prototype has reached its photo limit.");
+      const uid=crypto.randomUUID(),key=`${access.dataOwnerId}/${access.profile.id}/${uid}`,now=new Date().toISOString();await bucket().put(key,bytes,{httpMetadata:{contentType:mime}});
+      try {await db().batch([db().prepare("INSERT INTO uploads (id,owner_id,profile_id,object_key,mime_type,size,created_at) VALUES (?,?,?,?,?,?,?)").bind(uid,access.dataOwnerId,access.profile.id,key,mime,bytes.length,now),event(access.dataOwnerId,access.profile.id,uid,"photo_uploaded")]);}catch(e){await bucket().delete(key);throw e;}
       return json({id:uid,url:`/api/upload/${uid}`,size:bytes.length},201);
     }
     if(req.method==="GET"&&parts[0]==="upload"&&parts.length===2){
-      const found=await db().prepare("SELECT object_key,mime_type FROM uploads WHERE id=? AND owner_id=?").bind(id(parts[1]),owner).first<{object_key:string;mime_type:string}>();if(!found)throw new ApiError(404,"Photo not found.");const obj=await bucket().get(found.object_key);if(!obj)throw new ApiError(404,"Photo not found.");return new Response(obj.body,{headers:{...baseHeaders,"Content-Type":found.mime_type,"Content-Disposition":"inline","Content-Security-Policy":"default-src 'none'; sandbox"}});
+      const access=await authorizeUploadAccess(db(),principal,id(parts[1]));const obj=await bucket().get(access.upload.object_key);if(!obj)throw new ApiError(404,"Photo not found.");return new Response(obj.body,{headers:{...baseHeaders,"Content-Type":access.upload.mime_type,"Content-Disposition":"inline","Content-Security-Policy":"default-src 'none'; sandbox"}});
     }
     if(req.method==="DELETE"&&parts[0]==="upload"&&parts.length===2){
-      const uid=id(parts[1]);const used=await db().prepare("SELECT id FROM medications WHERE owner_id=? AND source_ids LIKE ? LIMIT 1").bind(owner,`%${uid}%`).first();const shared=await db().prepare("SELECT id FROM snapshots WHERE owner_id=? AND data LIKE ? LIMIT 1").bind(owner,`%${uid}%`).first();if(used||shared)throw new ApiError(409,"This photo is part of a saved record.");const found=await db().prepare("SELECT object_key FROM uploads WHERE id=? AND owner_id=?").bind(uid,owner).first<{object_key:string}>();if(found){await bucket().delete(found.object_key);await db().prepare("DELETE FROM uploads WHERE id=? AND owner_id=?").bind(uid,owner).run();}return json({deleted:true});
+      const access=await authorizeUploadAccess(db(),principal,id(parts[1]));const uid=access.upload.id;const used=await db().prepare("SELECT id FROM medications WHERE owner_id=? AND source_ids LIKE ? LIMIT 1").bind(access.dataOwnerId,`%${uid}%`).first();const shared=await db().prepare("SELECT id FROM snapshots WHERE owner_id=? AND data LIKE ? LIMIT 1").bind(access.dataOwnerId,`%${uid}%`).first();if(used||shared)throw new ApiError(409,"This photo is part of a saved record.");await bucket().delete(access.upload.object_key);await db().prepare("DELETE FROM uploads WHERE id=? AND owner_id=?").bind(uid,access.dataOwnerId).run();return json({deleted:true});
     }
     if(req.method==="POST"&&route==="parse") {const b=await body(req);const label=text(b.text,12000,true);return json(parseLabel(label));}
     if(req.method==="POST"&&route==="note-import"){
-      const b=await body(req,128000),p=await profile(owner,b.profileId),key=id(b.idempotencyKey);
+      await assertStaffToolsAllowed(db(),principal);
+      const b=await body(req,128000),access=await requireProfile(principal,b.profileId),key=id(b.idempotencyKey);
+      const owner=access.dataOwnerId,p=access.profile;
       const document=text(b.sourceDocument,120,true),sourceDate=text(b.sourceDate||"",10);
       if(b.reviewed!==true)throw new ApiError(400,"Review the selected medication lines before importing.");
       if(!Array.isArray(b.rows)||b.rows.length<1||b.rows.length>20)throw new ApiError(400,"Select between 1 and 20 reviewed medication lines.");
@@ -121,6 +143,7 @@ async function handle(req:Request,ctx:Context){
       return json({ids,unconfirmed:true},201);
     }
     if(req.method==="GET"&&route==="search"){
+      await assertStaffToolsAllowed(db(),principal);
       const q=text(url.searchParams.get("q")||"",180,true);if(q.length<3)throw new ApiError(400,"Enter at least three characters to search.");
       const result=await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(q)}`,{signal:AbortSignal.timeout(8000),headers:{Accept:"application/json"}}).catch(()=>{throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");});
       if(!result.ok)throw new ApiError(502,"The NLM medication reference is unavailable. You can continue manually.");
@@ -129,23 +152,23 @@ async function handle(req:Request,ctx:Context){
       const seen=new Set<string>();const results=allowed.flatMap(g=>g.conceptProperties||[]).filter(c=>{if(seen.has(c.rxcui))return false;seen.add(c.rxcui);return true;}).slice(0,12).map(c=>({rxCui:c.rxcui,name:c.name}));return json({results,source:"NLM RxNorm",note:"Reference matches do not establish your directions or current use."});
     }
     if(req.method==="POST"&&route==="medication"){
-      const b=await body(req),p=await profile(owner,b.profileId),fields=validateFields(b.fields);fields.adherenceReportedAt=fields.adherence==="not_reported"?"":new Date().toISOString();const sourceIds=await sources(owner,p.id,b.sourceIds||[]);
-      const count=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=?").bind(owner,p.id).first<{n:number}>();if((count?.n||0)>=100)throw new ApiError(400,"This prototype supports up to 100 entries in a list.");
-      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?)").bind(mid,owner,p.id,JSON.stringify(fields),JSON.stringify(sourceIds),now,now),event(owner,p.id,mid,"medication_created",1)]);return json({medication:med((await medication(owner,mid)))},201);
+      const b=await body(req),access=await requireProfile(principal,b.profileId),fields=validateFields(b.fields);fields.adherenceReportedAt=fields.adherence==="not_reported"?"":new Date().toISOString();const sourceIds=await sources(access.dataOwnerId,access.profile.id,b.sourceIds||[]);
+      const count=await db().prepare("SELECT COUNT(*) AS n FROM medications WHERE owner_id=? AND profile_id=?").bind(access.dataOwnerId,access.profile.id).first<{n:number}>();if((count?.n||0)>=100)throw new ApiError(400,"This prototype supports up to 100 entries in a list.");
+      const mid=crypto.randomUUID(),now=new Date().toISOString();await db().batch([db().prepare("INSERT INTO medications (id,owner_id,profile_id,data,source_ids,revision,created_at,updated_at) VALUES (?,?,?,?,?,1,?,?)").bind(mid,access.dataOwnerId,access.profile.id,JSON.stringify(fields),JSON.stringify(sourceIds),now,now),event(access.dataOwnerId,access.profile.id,mid,"medication_created",1)]);return json({medication:med((await requireMedication(principal,mid)).row)},201);
     }
     if(req.method==="PUT"&&parts[0]==="medication"&&parts.length===2){
-      const row=await medication(owner,parts[1]),b=await body(req),rev=revision(b.revision),fields=validateFields(b.fields);const previous=JSON.parse(row.data);if(previous.sourceDocument){fields.sourceDocument=previous.sourceDocument;fields.sourceDate=previous.sourceDate||"";fields.sourceText=previous.sourceText||"";}fields.adherenceReportedAt=fields.adherence==="not_reported"?"":b.adherenceReviewed===true||fields.adherence!==previous.adherence?new Date().toISOString():(previous.adherenceReportedAt||"");const sourceIds=await sources(owner,row.profile_id,b.sourceIds||[]);const now=new Date().toISOString();
-      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(JSON.stringify(fields),JSON.stringify(sourceIds),now,row.id,owner,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(owner,row.profile_id,row.id,"medication_updated",rev+1).run();return json({medication:med(await medication(owner,row.id))});
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision),fields=validateFields(b.fields);const previous=JSON.parse(row.data);if(previous.sourceDocument){fields.sourceDocument=previous.sourceDocument;fields.sourceDate=previous.sourceDate||"";fields.sourceText=previous.sourceText||"";}fields.adherenceReportedAt=fields.adherence==="not_reported"?"":b.adherenceReviewed===true||fields.adherence!==previous.adherence?new Date().toISOString():(previous.adherenceReportedAt||"");const sourceIds=await sources(access.dataOwnerId,row.profile_id,b.sourceIds||[]);const now=new Date().toISOString();
+      const result=await db().prepare("UPDATE medications SET data=?,source_ids=?,revision=revision+1,confirmed_revision=NULL,confirmed_at=NULL,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(JSON.stringify(fields),JSON.stringify(sourceIds),now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed in another session. Reload the list before editing again.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_updated",rev+1).run();return json({medication:med((await requireMedication(principal,row.id)).row)});
     }
     if(req.method==="POST"&&parts[0]==="confirm"&&parts.length===2){
-      const row=await medication(owner,parts[1]),b=await body(req),rev=revision(b.revision);if(b.acknowledged!==true)throw new ApiError(400,"Explicitly confirm this medication after reviewing it.");if(rev!==row.revision)throw new ApiError(409,"This entry changed. Please review its latest version.");validateFields(JSON.parse(row.data),true);const now=new Date().toISOString();
-      const result=await db().prepare("UPDATE medications SET confirmed_revision=revision,confirmed_at=?,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(now,now,row.id,owner,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Please review its latest version.");await event(owner,row.profile_id,row.id,"medication_confirmed",rev).run();return json({medication:med(await medication(owner,row.id))});
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);if(b.acknowledged!==true)throw new ApiError(400,"Explicitly confirm this medication after reviewing it.");if(rev!==row.revision)throw new ApiError(409,"This entry changed. Please review its latest version.");validateFields(JSON.parse(row.data),true);const now=new Date().toISOString();
+      const result=await db().prepare("UPDATE medications SET confirmed_revision=revision,confirmed_at=?,updated_at=? WHERE id=? AND owner_id=? AND revision=?").bind(now,now,row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Please review its latest version.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_confirmed",rev).run();return json({medication:med((await requireMedication(principal,row.id)).row)});
     }
     if(req.method==="DELETE"&&parts[0]==="medication"&&parts.length===2){
-      const row=await medication(owner,parts[1]),b=await body(req),rev=revision(b.revision);const result=await db().prepare("DELETE FROM medications WHERE id=? AND owner_id=? AND revision=?").bind(row.id,owner,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before removing it.");await event(owner,row.profile_id,row.id,"medication_removed",rev).run();return json({deleted:true});
+      const {row,access}=await requireMedication(principal,parts[1]),b=await body(req),rev=revision(b.revision);const result=await db().prepare("DELETE FROM medications WHERE id=? AND owner_id=? AND revision=?").bind(row.id,access.dataOwnerId,rev).run();if(result.meta.changes!==1)throw new ApiError(409,"This entry changed. Reload before removing it.");await event(access.dataOwnerId,row.profile_id,row.id,"medication_removed",rev).run();return json({deleted:true});
     }
     if(req.method==="POST"&&route==="card"){
-      const b=await body(req),p=await profile(owner,b.profileId);const recipient=text(b.recipient,120,true),patientName=text(b.patientName,120,true),key=id(b.idempotencyKey);
+      const b=await body(req),access=await requireProfile(principal,b.profileId);const owner=access.dataOwnerId,p=access.profile;const recipient=text(b.recipient,120,true),patientName=text(b.patientName,120,true),key=id(b.idempotencyKey);
       const existing=await db().prepare("SELECT id,profile_id FROM snapshots WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{id:string;profile_id:string}>();if(existing){if(existing.profile_id!==p.id)throw new ApiError(409,"This card request belongs to another list.");return json({id:existing.id});}
       const rows=await db().prepare("SELECT * FROM medications WHERE owner_id=? AND profile_id=? ORDER BY created_at LIMIT 100").bind(owner,p.id).all<Row>();const list=rows.results.map(med);
       if(!canCreateCard(list))throw new ApiError(409,"Confirm every medication's current version before creating a provider card.");for(const m of list)validateFields(m,true);
@@ -156,10 +179,17 @@ async function handle(req:Request,ctx:Context){
       try {result=await db().prepare(sql).bind(cid,owner,p.id,recipient,patientName,data,key,now,owner,p.id,list.length,owner,p.id,exact).run();}catch(e){const duplicate=await db().prepare("SELECT id FROM snapshots WHERE owner_id=? AND idempotency_key=?").bind(owner,key).first<{id:string}>();if(duplicate)return json({id:duplicate.id});throw e;}
       if(result.meta.changes!==1)throw new ApiError(409,"The list changed while the card was being created. Review and confirm the latest entries.");await event(owner,p.id,cid,"provider_card_created").run();return json({id:cid},201);
     }
-    if(req.method==="GET"&&parts[0]==="card"&&parts.length===2){const row=await db().prepare("SELECT data FROM snapshots WHERE id=? AND owner_id=?").bind(id(parts[1]),owner).first<{data:string}>();if(!row)throw new ApiError(404,"This card was not found.");return json({card:JSON.parse(row.data)});}
+    if(req.method==="GET"&&parts[0]==="card"&&parts.length===2){
+      const snap=await db().prepare("SELECT profile_id,owner_id,data FROM snapshots WHERE id=?").bind(id(parts[1])).first<{profile_id:string;owner_id:string;data:string}>();
+      if(!snap)throw new ApiError(404,"This card was not found.");
+      const access=await authorizeProfileAccess(db(),principal,snap.profile_id);
+      if(snap.owner_id!==access.dataOwnerId)throw new ApiError(404,"This card was not found.");
+      return json({card:JSON.parse(snap.data)});
+    }
     throw new ApiError(404,"This action was not found.");
   } catch(e){
     if(e instanceof ApiError)return json({error:e.message},e.status);
+    if(e instanceof AuthzError)return json({error:e.message},e.status);
     if(e instanceof ClinicApiError)return json({error:e.message},e.status);
     if(e instanceof ClinicIdentityError)return json({error:e.message},400);
     if(e instanceof MedicationValidationError)return json({error:e.message},400);
