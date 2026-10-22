@@ -1,0 +1,14 @@
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { mkdir, copyFile } from 'node:fs/promises';
+const require = createRequire(import.meta.url);
+const tessRoot = join(dirname(require.resolve('tesseract.js')), '..');
+const coreRoot = dirname(createRequire(require.resolve('tesseract.js')).resolve('tesseract.js-core/package.json'));
+const langRoot = dirname(require.resolve('@tesseract.js-data/eng/package.json'));
+const dest = join(process.cwd(), 'public/ocr');
+await mkdir(join(dest, 'core'), { recursive: true });
+await mkdir(join(dest, 'lang'), { recursive: true });
+await copyFile(join(tessRoot, 'dist/worker.min.js'), join(dest, 'worker.min.js'));
+for (const name of ['tesseract-core-lstm.wasm.js', 'tesseract-core-lstm.wasm', 'tesseract-core-simd-lstm.wasm.js', 'tesseract-core-simd-lstm.wasm']) await copyFile(join(coreRoot,name), join(dest,'core',name));
+await copyFile(join(langRoot,'4.0.0/eng.traineddata.gz'), join(dest,'lang/eng.traineddata.gz'));
+console.log('Same-origin OCR worker, engine, and English language data prepared.');
