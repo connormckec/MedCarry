@@ -7,7 +7,7 @@ type Props={
   fields:MedicationFields;sourceIds:string[];notices:string[];existing:boolean;quick:boolean;busy:boolean;error:string;saveState?:""|"saving"|"saved"|"error";
   cleanupFocus?:boolean;
   onField:<K extends keyof MedicationFields>(key:K,value:MedicationFields[K])=>void;onForm:(form:MedicationFields["formulation"])=>void;onSave:(confirm:boolean)=>void;
-  onNoLongerTake:()=>void;onAddedByMistake:()=>void;onCamera:()=>void;onAdvanced?:()=>void;
+  onUnsure:()=>void;onNoLongerTake:()=>void;onAddedByMistake:()=>void;onCamera:()=>void;onAdvanced?:()=>void;
 };
 const formNames:Record<MedicationFields["formulation"],string>={tablet:"Tablet",capsule:"Capsule",liquid:"Liquid",inhaler:"Inhaler",injection:"Injection",topical:"Cream / ointment",patch:"Patch",drops:"Drops",powder:"Powder",other:"Other / not sure"};
 
@@ -47,7 +47,7 @@ export default function PatientMedicationEditor(p:Props){
   return <>
     <div className="editor-content patient-editor">
       <p className="patient-step">{step} of 3{p.saveState==="saving"?" · Saving…":p.saveState==="saved"?" · Saved":""}</p>
-      <h3 ref={heading} tabIndex={-1}>{step===1?"What is the name?":step===2?"How do you take it?":"Does this look right?"}</h3>
+      <h3 ref={heading} tabIndex={-1}>{step===1?"What is the name?":step===2?"How do you take it?":"Is this medicine right?"}</h3>
       {p.cleanupFocus&&p.existing&&step!==3&&<div className="patient-cleanup-banner" role="status">
         <p>If this was added twice by mistake, choose <strong>I added this by mistake</strong> below. If you stopped taking it, choose <strong>I no longer take this</strong>.</p>
       </div>}
@@ -90,16 +90,21 @@ export default function PatientMedicationEditor(p:Props){
         {f.uncertaintyNote&&<p className="patient-review-note">{f.uncertaintyNote}</p>}{f.adherence!=="not_reported"&&<p className="patient-review-note">Missed doses: {f.adherence==="none_reported"?"None":f.adherence==="some_missed"?"Some":"Unsure"}</p>}
         {f.supplementFacts&&<details className="patient-extra"><summary>Supplement ingredients</summary><p className="patient-review-note">{f.supplementFacts}</p></details>}
         {evidence}
-        <p className="patient-confirm-copy">Confirm the details, including anything marked unsure.</p>
+        <p className="patient-confirm-copy">If everything matches how you take it, tap Yes. You can change details or say you are not sure.</p>
       </>}
       {f.sourceDocument&&<details className="patient-extra"><summary>From an older record</summary><p className="patient-review-note">{f.sourceDocument} · {f.sourceDate||"Date unknown"}</p><blockquote>{f.sourceText}</blockquote><p className="patient-small">Check what you take now. Reporting a change does not stop a prescription.</p></details>}
       {p.notices.length>0&&((!f.productName.trim()||(!f.strength.trim()&&!f.strengthUnknown))?<div className="notice-box" role="status"><strong>Check what the label reader found</strong>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</div>:<details className="patient-extra"><summary>Label reader notes</summary>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</details>)}
       {(stepError||p.error)&&<div className="patient-error" role="alert">{stepError||p.error}</div>}
+      {step!==3&&cleanup}
+    </div>
+    {step===3?<div className="dialog-bottom patient-editor-footer patient-confirm-actions">
+      <button className="button primary" disabled={p.busy} onClick={()=>p.onSave(true)}>{p.busy?<LoaderCircle className="spin" size={21}/>:<Check size={21}/>}Yes, that's right</button>
+      <button className="button secondary" disabled={p.busy} onClick={()=>go(2)}>Change something</button>
+      <button className="patient-text" disabled={p.busy} onClick={p.onUnsure}>I'm not sure</button>
       {cleanup}
-    </div>
-    <div className="dialog-bottom patient-editor-footer">
+    </div>:<div className="dialog-bottom patient-editor-footer">
       {step>1&&<button className="button secondary" disabled={p.busy} onClick={()=>go(step-1)}>Back</button>}
-      <button className="button primary" disabled={p.busy} onClick={()=>step===3?p.onSave(true):go(step+1)}>{p.busy?<LoaderCircle className="spin" size={21}/>:step===3?<Check size={21}/>:null}{step===3?"Yes, this is correct":"Next"}{step<3&&<ChevronRight size={21}/>}</button>
-    </div>
+      <button className="button primary" disabled={p.busy} onClick={()=>go(step+1)}>{p.busy?<LoaderCircle className="spin" size={21}/>:null}Next<ChevronRight size={21}/></button>
+    </div>}
   </>;
 }
