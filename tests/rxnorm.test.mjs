@@ -114,7 +114,7 @@ test('unmatched and outage paths stay usable without inventing identity', () => 
 test('supplements stay unmatched and patient prompt copy is fixed', () => {
   const supp = normalizeFromFixture(base({ category: 'supplement', productName: 'Vitamin D3', strength: '2000 IU' }));
   assert.equal(supp.mappingStatus, 'unmatched');
-  assert.equal(patientDuplicatePrompt(), 'This may already be on your list.');
+  assert.equal(patientDuplicatePrompt(), 'Looks similar to another medicine on your list.');
   assert.equal(parseDuplicateResponse('take_both'), 'take_both');
   assert.throws(() => parseDuplicateResponse('merge_now'), RxNormError);
 });

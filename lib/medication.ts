@@ -214,7 +214,49 @@ export function parseLabel(raw: string): { fields: MedicationFields; notices: st
     fields.doseUnit = "capsules";
   }
   if (/\b(?:by mouth|orally)\b/i.test(fields.labelDirections)) fields.route = "By mouth";
-  const directions = fields.labelDirections.toLowerCase();
+  const proposed = proposeUseFromDirections(fields.labelDirections);
+  fields.actualDose = proposed.actualDose;
+  fields.frequency = proposed.frequency;
+  fields.timing = proposed.timing;
+  fields.actualInstructions = proposed.actualInstructions;
+  notices.push(...proposed.notices);
+  if (/supplement facts/i.test(text)) {
+    fields.category = "supplement";
+    fields.supplementFacts = text.slice(text.toLowerCase().indexOf("supplement facts"), text.toLowerCase().indexOf("supplement facts") + 2500);
+    fields.rxCui = "";
+    notices.push("Check the serving size and ingredient panel. Suggested label use is not evidence of your actual use.");
+  }
+  if (!fields.labelDirections) notices.push("Directions were not readable. Enter your current use, or explicitly mark it as uncertain.");
+  else if (!fields.actualDose && proposed.frequency !== "custom") notices.push("The amount per dose needs your review.");
+  if (lines.filter((l) => strengthPattern.test(l) && !isInstructionLine(l)).length > 2) {
+    notices.push("Check that these photos show one product. Separate medications need separate entries.");
+  }
+  return { fields, notices };
+}
+
+/** Draft patient-reported use from label SIG text. Never confirms use — patient must review and confirm. */
+export type UseFromDirections = {
+  actualDose: string;
+  frequency: keyof typeof frequencies;
+  timing: string;
+  actualInstructions: string;
+  notices: string[];
+  /** True when frequency was filled from the directions (including custom/PRN). */
+  suggested: boolean;
+};
+
+export function proposeUseFromDirections(labelDirections: string): UseFromDirections {
+  const directions = (labelDirections || "").toLowerCase();
+  const result: UseFromDirections = {
+    actualDose: "",
+    frequency: "unknown",
+    timing: "",
+    actualInstructions: "",
+    notices: [],
+    suggested: false,
+  };
+  if (!directions.trim()) return result;
+
   const amount = directions.match(
     /\b(?:take|give|use|inject|inhale|apply|instill|chew|dissolve)\s+(one-half|one half|half|one|two|three|four|\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*(?:tablets?|tabs?|capsules?|caps?|m[l1]|puffs?|units?|patch(?:es)?|drops?|scoops?)\b/,
   );
@@ -228,39 +270,39 @@ export function parseLabel(raw: string): { fields: MedicationFields; notices: st
       three: "3",
       four: "4",
     };
-    fields.actualDose = words[amount[1]] || amount[1].replace(/\s/g, "");
+    result.actualDose = words[amount[1]] || amount[1].replace(/\s/g, "");
   }
-  if (/\b(?:as needed|when needed|prn)\b/.test(directions)) fields.frequency = "prn";
-  else if (/\b(?:every other day|alternate days)\b/.test(directions)) fields.frequency = "alternate";
-  else if (/\b(?:once (?:a )?week|weekly|every week)\b/.test(directions)) fields.frequency = "weekly";
-  else if (/\b(?:four times|4 times|qid)\b/.test(directions)) fields.frequency = "four";
-  else if (/\b(?:three times|3 times|tid)\b/.test(directions)) fields.frequency = "three";
-  else if (/\b(?:twice|two times|2 times|bid)\b/.test(directions)) fields.frequency = "twice";
-  else if (/\b(?:daily|every day|once a day|once per day|qd)\b/.test(directions)) fields.frequency = "daily";
+  if (/\b(?:as needed|when needed|prn)\b/.test(directions)) result.frequency = "prn";
+  else if (/\b(?:every other day|alternate days)\b/.test(directions)) result.frequency = "alternate";
+  else if (/\b(?:once (?:a )?week|weekly|every week)\b/.test(directions)) result.frequency = "weekly";
+  else if (/\b(?:four times|4 times|qid)\b/.test(directions)) result.frequency = "four";
+  else if (/\b(?:three times|3 times|tid)\b/.test(directions)) result.frequency = "three";
+  else if (/\b(?:twice|two times|2 times|bid)\b/.test(directions)) result.frequency = "twice";
+  else if (/\b(?:daily|every day|once a day|once per day|qd)\b/.test(directions)) result.frequency = "daily";
+
   const complex =
     /\b(?:then|taper|except|alternat(?:e|ing) doses?|for \d+ days?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(directions) ||
     (!/as needed|prn/.test(directions) && /every\s+\d+\s+hours?/.test(directions));
   if (complex) {
-    fields.frequency = "custom";
-    fields.actualDose = "";
-    notices.push("This schedule needs a manual check. Preserve the full instructions, including dates or different doses.");
+    result.frequency = "custom";
+    result.actualDose = "";
+    result.actualInstructions = labelDirections.trim().slice(0, 1600);
+    result.notices.push("This schedule needs a manual check. Preserve the full instructions, including dates or different doses.");
   }
-  fields.actualInstructions = complex ? fields.labelDirections : "";
-  fields.timing = ["morning", "evening", "bedtime", "with food", "with meals", "before meals", "on an empty stomach"]
+  result.timing = ["morning", "evening", "bedtime", "with food", "with meals", "before meals", "on an empty stomach"]
     .filter((s) => directions.includes(s))
     .join(", ");
-  if (/supplement facts/i.test(text)) {
-    fields.category = "supplement";
-    fields.supplementFacts = text.slice(text.toLowerCase().indexOf("supplement facts"), text.toLowerCase().indexOf("supplement facts") + 2500);
-    fields.rxCui = "";
-    notices.push("Check the serving size and ingredient panel. Suggested label use is not evidence of your actual use.");
+  result.suggested = result.frequency !== "unknown";
+  if (result.suggested) {
+    result.notices.push("How often was filled from the label directions as a starting draft. Change it if you take this differently. Confirming still means you checked your current use.");
   }
-  if (!fields.labelDirections) notices.push("Directions were not readable. Enter your current use, or explicitly mark it as uncertain.");
-  if (!fields.actualDose && !complex) notices.push("The amount per dose needs your review.");
-  if (lines.filter((l) => strengthPattern.test(l) && !isInstructionLine(l)).length > 2) {
-    notices.push("Check that these photos show one product. Separate medications need separate entries.");
-  }
-  return { fields, notices };
+  return result;
+}
+
+/** True when patient-use fields look like a draft from label directions (not yet confirmed as actual use). */
+export function isLabelUseDraft(fields: Pick<MedicationFields, "labelDirections" | "frequency" | "source">): boolean {
+  if (!fields.labelDirections.trim() || fields.frequency === "unknown") return false;
+  return fields.source === "photo" || fields.source === "note";
 }
 
 export function snapshotText(card: Snapshot): string {

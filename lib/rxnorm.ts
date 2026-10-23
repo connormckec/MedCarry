@@ -646,7 +646,7 @@ export function duplicateFlagLabel(type: DuplicateFlagType): string {
 }
 
 export function patientDuplicatePrompt(): string {
-  return "This may already be on your list.";
+  return "Looks similar to another medicine on your list.";
 }
 
 /** Manual outage path: keep originals, mark unavailable, never invent identity. */
