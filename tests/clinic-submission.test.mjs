@@ -7,6 +7,9 @@ import {
   appointmentCalendarDate,
   deliveryLabel,
   parseAprimaStatus,
+  patientReceiptCopy,
+  PATIENT_SEND_CTA,
+  STAFF_INBOX_INTRO,
   ClinicSubmissionError,
 } from '../lib/clinic-submission.ts';
 import { emptyMedication } from '../lib/medication.ts';
@@ -58,6 +61,21 @@ test('delivery label reserves Received for durable ack only', () => {
   assert.equal(deliveryLabel('received'), 'Received by the clinic');
   assert.equal(parseAprimaStatus('entered_manually'), 'entered_manually');
   assert.throws(() => parseAprimaStatus('write_back'), ClinicSubmissionError);
+});
+
+test('patient portal copy never frames email/SMS/OS share as clinic delivery', () => {
+  assert.match(PATIENT_SEND_CTA, /secure clinic portal/i);
+  assert.doesNotMatch(PATIENT_SEND_CTA, /email|text|share sheet|SMS/i);
+  assert.match(STAFF_INBOX_INTRO, /portal inbox/i);
+  assert.match(STAFF_INBOX_INTRO, /Not email delivery/i);
+  const pending = patientReceiptCopy('pending');
+  assert.match(pending.headline, /secure clinic portal/i);
+  assert.match(pending.portalNote, /not clinic delivery/i);
+  assert.doesNotMatch(pending.headline, /Received by the clinic/);
+  const received = patientReceiptCopy('received');
+  assert.equal(received.headline, 'Received by the clinic.');
+  assert.match(received.portalNote, /staff portal inbox/i);
+  assert.match(received.portalNote, /Do not text, email, or use your phone/i);
 });
 
 test('appointment calendar date uses appointment timezone', () => {

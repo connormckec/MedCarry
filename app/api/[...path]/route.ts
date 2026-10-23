@@ -559,8 +559,8 @@ async function handle(req:Request,ctx:Context){
         receivingClinic:RECEIVING_CLINIC_NAME,
         replayed:created.replayed,
         note:submission.deliveryStatus==="received"
-          ?"Received by the clinic. Staff review and Aprima entry are separate steps."
-          :"Submitted. Waiting for durable clinic receipt — a local snapshot is not delivery.",
+          ?"Received by the clinic via secure portal inbox. Staff review and Aprima entry are separate steps. Not email or SMS delivery."
+          :"Submitted to the secure clinic portal. Waiting for durable inbox receipt — a local snapshot or phone share is not delivery.",
       },created.replayed?200:201);
     }
     if(req.method==="GET"&&route==="clinic/inbox"){
@@ -592,7 +592,7 @@ async function handle(req:Request,ctx:Context){
             aprimaStatus:a.submission?.aprimaStatus||"not_entered",
           },
         })),
-        note:"Primary action is Review on a received submission. ZIP and respondent stay in expanded detail.",
+        note:"Clinic portal inbox is the receive path (not email). Primary action is Review on a received submission. ZIP and respondent stay in expanded detail.",
       });
     }
     if(req.method==="GET"&&parts[0]==="clinic"&&parts[1]==="submission"&&parts.length===3){
