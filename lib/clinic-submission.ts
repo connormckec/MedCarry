@@ -161,8 +161,12 @@ export function deliveryLabel(status: DeliveryStatus): string {
   return status === "received" ? "Received by the clinic" : "Submitted — waiting for clinic receipt";
 }
 
-/** Patient-facing clinic name for portal send (not email/SMS). */
-export const PATIENT_SEND_CTA = "Send my list to Innovation Cardiology via secure clinic portal";
+/** Patient primary send action — clinic name and portal path live in surrounding copy. */
+export const PATIENT_SEND_CTA = "I'm done — send my list";
+
+/** Short framing under the send button: named clinic + secure portal (not email/SMS). */
+export const PATIENT_SEND_INTRO =
+  "Sends your checked list to Innovation Cardiology through the secure clinic portal — not by text, email, or phone share sheet.";
 
 /** Receipt helper: durable inbox ack only — never OS share / email / SMS. */
 export function patientReceiptCopy(status: DeliveryStatus, clinicName: string = RECEIVING_CLINIC_NAME): {

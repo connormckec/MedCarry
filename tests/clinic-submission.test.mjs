@@ -9,6 +9,7 @@ import {
   parseAprimaStatus,
   patientReceiptCopy,
   PATIENT_SEND_CTA,
+  PATIENT_SEND_INTRO,
   STAFF_INBOX_INTRO,
   ClinicSubmissionError,
 } from '../lib/clinic-submission.ts';
@@ -64,8 +65,11 @@ test('delivery label reserves Received for durable ack only', () => {
 });
 
 test('patient portal copy never frames email/SMS/OS share as clinic delivery', () => {
-  assert.match(PATIENT_SEND_CTA, /secure clinic portal/i);
+  assert.match(PATIENT_SEND_CTA, /I'm done/i);
   assert.doesNotMatch(PATIENT_SEND_CTA, /email|text|share sheet|SMS/i);
+  assert.match(PATIENT_SEND_INTRO, /Innovation Cardiology/i);
+  assert.match(PATIENT_SEND_INTRO, /secure clinic portal/i);
+  assert.match(PATIENT_SEND_INTRO, /not by text, email/i);
   assert.match(STAFF_INBOX_INTRO, /portal inbox/i);
   assert.match(STAFF_INBOX_INTRO, /Not email delivery/i);
   const pending = patientReceiptCopy('pending');
