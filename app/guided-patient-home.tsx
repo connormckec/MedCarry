@@ -60,8 +60,8 @@ export default function GuidedPatientHome(p:Props){
         <div className="patient-success"><Check size={34}/></div>
         <h1>{receipt.headline}</h1>
         <p>{receipt.detail}</p>
-        <p className="patient-small">{receipt.portalNote}{p.clinicReceipt.emptyListAttested?" You attested that you take no medications.":""}</p>
-        <button className="patient-primary" disabled={p.processing} onClick={p.onViewReceipt}>View what the clinic received<ChevronRight size={22}/></button>
+        {(receipt.portalNote||p.clinicReceipt.emptyListAttested)&&<p className="patient-small">{receipt.portalNote}{p.clinicReceipt.emptyListAttested?(receipt.portalNote?" ":"")+"You attested that you take no medications.":""}</p>}
+        <button className="patient-primary" disabled={p.processing} onClick={p.onViewReceipt}>View what was received<ChevronRight size={22}/></button>
         <button className="patient-text" onClick={()=>{setAdding(false);setReadyToSend(false);p.onChangeList();}}>Add or change a medication</button>
       </>
       :<>
@@ -88,7 +88,7 @@ export default function GuidedPatientHome(p:Props){
           </div>)}
         </div>}
         {capture?<>
-          <h1>Add a medication.</h1>
+          <h1>Add a medicine.</h1>
           <p className="patient-intro">Photograph the name and directions. Include vitamins and supplements too.</p>
           <div className="patient-capture">
             <button className="patient-primary" disabled={p.processing} onClick={p.onCamera}><Camera size={24}/>Take a picture</button>
@@ -103,8 +103,8 @@ export default function GuidedPatientHome(p:Props){
           <h1>Anything missing?</h1>
           <p className="patient-intro">Medicines, vitamins, or supplements that are not on your list yet?</p>
           <div className="patient-count">{p.medications.length} checked</div>
-          <button className="patient-primary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Yes — add one</button>
-          <button className="patient-secondary" disabled={p.processing} onClick={()=>setReadyToSend(true)}>No — nothing missing<ChevronRight size={22}/></button>
+          <button className="patient-primary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Add a medicine</button>
+          <button className="patient-secondary" disabled={p.processing} onClick={()=>setReadyToSend(true)}>Nothing missing<ChevronRight size={22}/></button>
           {listDetails}
         </>
         :sendStep?<>
@@ -112,13 +112,13 @@ export default function GuidedPatientHome(p:Props){
           <p className="patient-intro">{PATIENT_SEND_INTRO}</p>
           <div className="patient-count">{p.medications.length} medicine{p.medications.length===1?"":"s"} ready</div>
           <button className="patient-primary" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:false})}><Check size={23}/>{PATIENT_SEND_CTA}</button>
-          <button className="patient-secondary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Add another medication</button>
+          <button className="patient-secondary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Add a medicine</button>
           <button className="patient-text" disabled={p.processing} onClick={()=>setReadyToSend(false)}>Back</button>
           {listDetails}
         </>
         :<>
           <h1>Check your medicines.</h1>
-          <p className="patient-intro">One medicine at a time. Tap Yes if it is right, or change it if something is wrong.</p>
+          <p className="patient-intro">One at a time.</p>
           <div className="patient-count">{p.medications.length-pending.length} of {p.medications.length} checked</div>
           {next&&<div className="patient-next-med" aria-live="polite">
             <span className="patient-med-icon"><Pill size={28}/></span>

@@ -1,3 +1,3 @@
-import MedicationApp from "./medication-app";
+import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
-export default function Home() { return <MedicationApp />; }
+export default function Home(){redirect("/patient");}

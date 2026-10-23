@@ -64,22 +64,21 @@ test('delivery label reserves Received for durable ack only', () => {
   assert.throws(() => parseAprimaStatus('write_back'), ClinicSubmissionError);
 });
 
-test('patient portal copy never frames email/SMS/OS share as clinic delivery', () => {
+test('patient and staff copy stay short; Received is only for durable ack', () => {
   assert.match(PATIENT_SEND_CTA, /I'm done/i);
   assert.doesNotMatch(PATIENT_SEND_CTA, /email|text|share sheet|SMS/i);
   assert.match(PATIENT_SEND_INTRO, /Innovation Cardiology/i);
-  assert.match(PATIENT_SEND_INTRO, /secure clinic portal/i);
-  assert.match(PATIENT_SEND_INTRO, /not by text, email/i);
-  assert.match(STAFF_INBOX_INTRO, /portal inbox/i);
-  assert.match(STAFF_INBOX_INTRO, /Not email delivery/i);
+  assert.doesNotMatch(PATIENT_SEND_INTRO, /email|text|share sheet|SMS|portal architecture/i);
+  assert.match(STAFF_INBOX_INTRO, /Innovation Cardiology/i);
+  assert.doesNotMatch(STAFF_INBOX_INTRO, /Not email delivery|email attachment|share sheet/i);
   const pending = patientReceiptCopy('pending');
-  assert.match(pending.headline, /secure clinic portal/i);
-  assert.match(pending.portalNote, /not clinic delivery/i);
+  assert.match(pending.headline, /List sent/i);
   assert.doesNotMatch(pending.headline, /Received by the clinic/);
+  assert.doesNotMatch(pending.portalNote, /email|share sheet|architecture/i);
   const received = patientReceiptCopy('received');
   assert.equal(received.headline, 'Received by the clinic.');
-  assert.match(received.portalNote, /staff portal inbox/i);
-  assert.match(received.portalNote, /Do not text, email, or use your phone/i);
+  assert.match(received.detail, /Innovation Cardiology/i);
+  assert.doesNotMatch(received.portalNote, /email|share sheet|Aprima/i);
 });
 
 test('appointment calendar date uses appointment timezone', () => {

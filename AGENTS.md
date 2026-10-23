@@ -1,11 +1,11 @@
 # MedCarry contributor brief
 
-Read `README.md`, `docs/CURSOR_HANDOFF.md`, and `docs/MVP_WORKFLOW.md` before changing the product. Staff/test tools at `/`, the working guided UI at `/patient`, and demonstration wireframes at `/wireframes` are separate experiences in the same repository.
+Read `README.md`, `docs/CURSOR_HANDOFF.md`, and `docs/MVP_WORKFLOW.md` before changing the product. Patient review at `/patient` (also `/`), staff workspace and portal inbox at `/staff`, and demonstration wireframes at `/wireframes` are separate experiences in the same repository.
 
 ## Product rules
 
 - Design for patients who need help using a phone. Use one primary action per step, plain language, large patient text, visible focus, and large touch targets.
-- Keep staff navigation, import, list switching, and test tools out of the patient page. Use the three-step editor by default; reserve the detailed editor for an explicit staff action. Patient completion is **I've added all my medications**, followed by a saved-copy receipt, never a claim of clinic delivery.
+- Keep staff navigation, import, list switching, and test tools on `/staff` only — never on `/patient`. Use the three-step editor by default; reserve the detailed editor for an explicit staff action. Patient completion is **I've added all my medications**, followed by a saved-copy receipt, never a claim of clinic delivery.
 - Keep product strength, label directions, and patient-reported use distinct. Never infer ingestion, a current prescription, or adherence from a photograph.
 - Every medication requires explicit confirmation at its current revision. Edits invalidate confirmation. Preserve backend ownership, revision, confirmation, and snapshot gates.
 - Uncertainty remains visible. Never silently fill missing strength, dose, route, schedule, or supplement composition.

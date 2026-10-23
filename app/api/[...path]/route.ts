@@ -89,7 +89,7 @@ function revision(value:unknown){if(!Number.isInteger(value)||Number(value)<1)th
 function text(value:unknown,max:number,required=false){if(typeof value!=="string"||value.trim().length>max||(required&&!value.trim()))throw new ApiError(400,"Check the text you entered.");return value.trim();}
 async function handle(req:Request,ctx:Context){
   try {
-    const user=await getChatGPTUser();if(!user)return json({error:"Sign in to access your medication list.",signInUrl:chatGPTSignInPath(req.headers.get("x-medcarry-view")==="patient"?"/patient":"/")},401);
+    const user=await getChatGPTUser();if(!user)return json({error:"Sign in to access your medication list.",signInUrl:chatGPTSignInPath(req.headers.get("x-medcarry-view")==="patient"?"/patient":"/staff")},401);
     const principal=user.userId;const parts=(await ctx.params).path;const url=new URL(req.url);const route=parts.join("/");
     if(req.method!=="GET"){
       if(req.headers.get("x-medcarry-request")!=="1")throw new ApiError(403,"This action must originate from the app.");
@@ -559,8 +559,8 @@ async function handle(req:Request,ctx:Context){
         receivingClinic:RECEIVING_CLINIC_NAME,
         replayed:created.replayed,
         note:submission.deliveryStatus==="received"
-          ?"Received by the clinic via secure portal inbox. Staff review and Aprima entry are separate steps. Not email or SMS delivery."
-          :"Submitted to the secure clinic portal. Waiting for durable inbox receipt — a local snapshot or phone share is not delivery.",
+          ?"Received by the clinic."
+          :"Submitted — waiting for clinic receipt.",
       },created.replayed?200:201);
     }
     if(req.method==="GET"&&route==="clinic/inbox"){
@@ -592,7 +592,7 @@ async function handle(req:Request,ctx:Context){
             aprimaStatus:a.submission?.aprimaStatus||"not_entered",
           },
         })),
-        note:"Clinic portal inbox is the receive path (not email). Primary action is Review on a received submission. ZIP and respondent stay in expanded detail.",
+        note:"Review a received submission. ZIP and respondent stay in expanded detail.",
       });
     }
     if(req.method==="GET"&&parts[0]==="clinic"&&parts[1]==="submission"&&parts.length===3){
