@@ -37,27 +37,26 @@ export default function StaffHome(p:Props){
   const flags=(p.duplicateFlags||[]).filter(f=>f.status==="open"||f.status==="unsure");
   function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` · ${m.strength}`:""}`:id.slice(0,8);}
   return <main className="staff-home">
-    <header className="staff-header"><a className="brand" href="/"><span className="brand-icon"><WalletCards size={22}/></span>MedCarry</a><span className="staff-label">Staff workspace</span></header>
-    <div className="staff-content"><div className="staff-title"><div><h1>{mode==="inbox"?"Clinic portal inbox":"Medication lists"}</h1><p>{mode==="inbox"?STAFF_INBOX_INTRO:"Test version · Local lists · Innovation Cardiology · Portal inbox is the clinical receive path"}</p></div>
-      <div className="staff-mode-switch"><button className={`button ${mode==="inbox"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Portal inbox</button><button className={`button ${mode==="lists"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>setMode("lists")}>Lists</button></div>
+    <header className="staff-header"><a className="brand" href="/staff"><span className="brand-icon"><WalletCards size={22}/></span>MedCarry</a><span className="staff-label">Staff workspace</span></header>
+    <div className="staff-content"><div className="staff-title"><div><h1>{mode==="inbox"?"Clinic inbox":"Medication lists"}</h1><p>{mode==="inbox"?STAFF_INBOX_INTRO:"Demo lists"}</p></div>
+      <div className="staff-mode-switch"><button className={`button ${mode==="inbox"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Inbox</button><button className={`button ${mode==="lists"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>setMode("lists")}>Lists</button></div>
     </div>
       {p.signIn?<div className="staff-empty"><h2>Sign in to continue.</h2><a className="button primary" href={p.signIn} target="_top">Sign in with ChatGPT<ChevronRight size={18}/></a></div>
       :p.loading?<p className="loading-state"><LoaderCircle className="spin"/>Opening list…</p>:mode==="inbox"?<>
         <div className="staff-inbox-toolbar">
           <label className="field">Appointment date<input type="date" value={p.inboxDate} onChange={e=>p.onInboxDate(e.target.value)} disabled={p.inboxBusy||p.busy}/></label>
-          <button className="button secondary" disabled={p.inboxBusy||p.busy} onClick={p.onLoadInbox}>{p.inboxBusy?"Loading…":"Refresh portal inbox"}</button>
+          <button className="button secondary" disabled={p.inboxBusy||p.busy} onClick={p.onLoadInbox}>{p.inboxBusy?"Loading…":"Refresh"}</button>
         </div>
-        <p className="staff-uncertainty">Patient lists arrive here after durable portal receipt — not by email attachment, SMS of the list, or phone share sheet.</p>
         {header&&<section className="staff-identity-header" aria-label="Patient identity for this appointment">
-          <div className="staff-identity-kicker">Protected patient detail · synthetic fixture</div>
+          <div className="staff-identity-kicker">Patient</div>
           <div className="staff-identity-grid">
             <div><h2>{header.patient.legalName}</h2><p>DOB {formatDob(header.patient.dob)}{header.patient.postalCode?` · ZIP ${header.patient.postalCode}`:""}</p></div>
             <div><strong>Appointment</strong><p>{formatAppointment(header.appointment.startsAt,header.appointment.timezone)} · {header.appointment.providerName}</p><p>{header.appointment.serviceName}</p></div>
-            <div><strong>Submission</strong><p>{header.submissionStatus.replaceAll("_"," ")}</p><p>Aprima: {header.aprimaStatus.replaceAll("_"," ")}</p></div>
+            <div><strong>Submission</strong><p>{statusLabel(header.submissionStatus)}</p><p>Aprima: {header.aprimaStatus.replaceAll("_"," ")}</p></div>
           </div>
         </section>}
         <section className="staff-inbox" aria-label="Appointment inbox">
-          {p.inboxRows.length===0?<div className="staff-empty"><FileText size={30}/><h3>No appointments for this date.</h3><p>Load the synthetic fixture or choose another day.</p></div>
+          {p.inboxRows.length===0?<div className="staff-empty"><FileText size={30}/><h3>No appointments for this date.</h3><p>Choose another day, or use Testing tools to load the demo appointment.</p></div>
           :p.inboxRows.map(row=>{
             const counts=row.queue.changeCounts;
             const canReview=!!row.submission&&(row.queue.submissionStatus==="received"||row.queue.submissionStatus==="reviewed");
@@ -70,28 +69,27 @@ export default function StaffHome(p:Props){
               </div>
               <div className="staff-inbox-actions">
                 <button className="button primary" disabled={!canReview||p.busy} onClick={()=>row.submission&&p.onReviewSubmission(row.submission.id)}>Review<ChevronRight size={17}/></button>
-                <button className="text-button" onClick={()=>setExpanded(expanded===row.appointmentId?null:row.appointmentId)}>{expanded===row.appointmentId?"Hide detail":"Show ZIP / respondent"}</button>
+                <button className="text-button" onClick={()=>setExpanded(expanded===row.appointmentId?null:row.appointmentId)}>{expanded===row.appointmentId?"Hide detail":"Show detail"}</button>
               </div>
               {expanded===row.appointmentId&&<div className="staff-inbox-detail">
                 <p>ZIP {row.detail.patientPostalCode||"not on file"}</p>
                 <p>Respondent id {row.detail.respondentId||"not selected"}</p>
-                <p>Aprima {row.detail.aprimaStatus.replaceAll("_"," ")} (no write-back)</p>
+                <p>Aprima {row.detail.aprimaStatus.replaceAll("_"," ")}</p>
                 <p>{row.serviceName}</p>
               </div>}
             </article>;
           })}
         </section>
-        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading synthetic header…":"Load synthetic appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
+        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading…":"Load demo appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
       </>:<>
         <div className="staff-list-picker"><label className="field">Selected list<select value={p.profileId} onChange={e=>e.target.value==="new"?p.onNewProfile():p.onProfile(e.target.value)} disabled={p.processing||p.busy}>{!p.profiles.length&&<option value="">New medication list</option>}{p.profiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}</option>)}<option value="new">+ New list</option></select></label><a className="staff-patient-link" href={p.profileId?`/patient?profile=${p.profileId}`:"/patient"}>Open patient view<ArrowUpRight size={18}/></a></div>
         <div className="staff-toolbar"><button className="button primary" disabled={p.processing||p.busy} onClick={p.onImport}><FileText size={19}/>Import a list</button><button className="button secondary" aria-expanded={adding} disabled={p.processing||p.busy} onClick={()=>setAdding(!adding)}><Plus size={19}/>Add medication</button></div>
         {adding&&<div className="staff-add-options"><button className="button secondary" onClick={p.onCamera}><Camera size={18}/>Take picture</button><button className="button secondary" onClick={p.onUpload}><Upload size={18}/>Choose picture</button><button className="button secondary" onClick={p.onManual}>Type it in</button></div>}
         <div className="staff-list-heading"><h2>{history?"Saved lists":"Medications"} <span>{history?p.cards.length:p.medications.length}</span></h2><button className="text-button" onClick={()=>setHistory(!history)}>{history?"Back to medications":"Local snapshots"}</button></div>
-        {history?<section>{p.cards.length?p.cards.map(card=><button className="saved-card" disabled={p.busy} key={card.id} onClick={()=>p.onOpenCard(card.id)}><FileText size={25}/><span><strong>{card.patient_name}</strong><span>{new Date(card.created_at).toLocaleDateString()} · {card.recipient} · local only</span></span><ChevronRight size={20}/></button>):<p className="staff-empty">No local snapshots yet.</p>}</section>
+        {history?<section>{p.cards.length?p.cards.map(card=><button className="saved-card" disabled={p.busy} key={card.id} onClick={()=>p.onOpenCard(card.id)}><FileText size={25}/><span><strong>{card.patient_name}</strong><span>{new Date(card.created_at).toLocaleDateString()} · {card.recipient}</span></span><ChevronRight size={20}/></button>):<p className="staff-empty">No local snapshots yet.</p>}</section>
         :<section>
-          {flags.length>0&&<div className="staff-duplicate-flags" aria-label="Explainable duplicate review flags">
-            <h3>Possible duplicates / review flags</h3>
-            <p className="staff-uncertainty">Explainable proposals only. Medications are never auto-merged or removed.</p>
+          {flags.length>0&&<div className="staff-duplicate-flags" aria-label="Duplicate review flags">
+            <h3>Possible duplicates</h3>
             {flags.map(flag=><article className="staff-medication" key={flag.id}>
               <div>
                 <h3>{flag.flagType.replaceAll("_"," ")}</h3>
@@ -102,10 +100,10 @@ export default function StaffHome(p:Props){
               {p.onDuplicateDismiss&&flag.status==="open"&&<button className="button secondary" disabled={p.busy} onClick={()=>p.onDuplicateDismiss!(flag.id)}>Dismiss</button>}
             </article>)}
           </div>}
-          {p.medications.length?<div className="staff-medications">{p.medications.map(m=><article className="staff-medication" key={m.id}><div><h3>{m.productName||"Unnamed medication"}</h3><p>{m.strengthUnknown?"Strength unsure":m.strength||"Strength missing"} · {m.formulation}</p><span className={`status ${isConfirmed(m)?"confirmed":"pending"}`}>{isConfirmed(m)?<Check size={13}/>:null}{isConfirmed(m)?"Confirmed":"Needs review"}</span>{(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure")&&<p className="staff-uncertainty">Unsure details · clinic review needed</p>}</div><button className="button secondary" disabled={p.busy} onClick={()=>p.onReview(m)}>Review<ChevronRight size={17}/></button></article>)}</div>:<div className="staff-empty"><FileText size={30}/><h3>No medications yet.</h3><p>Import an old list or add one medication.</p></div>}
-          {p.medications.length>0&&<div className="staff-list-footer"><p>{pending?`${pending} medication${pending===1?"":"s"} to confirm`:"All medications confirmed"}</p><button className="button secondary" disabled={!canCreateCard(p.medications)||p.busy} onClick={p.onCreateCard}>Save local snapshot<ChevronRight size={18}/></button></div>}
+          {p.medications.length?<div className="staff-medications">{p.medications.map(m=><article className="staff-medication" key={m.id}><div><h3>{m.productName||"Unnamed medication"}</h3><p>{m.strengthUnknown?"Strength unsure":m.strength||"Strength missing"} · {m.formulation}</p><span className={`status ${isConfirmed(m)?"confirmed":"pending"}`}>{isConfirmed(m)?<Check size={13}/>:null}{isConfirmed(m)?"Confirmed":"Needs review"}</span>{(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure")&&<p className="staff-uncertainty">Unsure details</p>}</div><button className="button secondary" disabled={p.busy} onClick={()=>p.onReview(m)}>Review<ChevronRight size={17}/></button></article>)}</div>:<div className="staff-empty"><FileText size={30}/><h3>No medications yet.</h3><p>Import a list or add a medication.</p></div>}
+          {p.medications.length>0&&<div className="staff-list-footer"><p>{pending?`${pending} to confirm`:"All confirmed"}</p><button className="button secondary" disabled={!canCreateCard(p.medications)||p.busy} onClick={p.onCreateCard}>Save local snapshot<ChevronRight size={18}/></button></div>}
         </section>}
-        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onDemo}>Try a fictional label</button><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading synthetic header…":"Load synthetic appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
+        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onDemo}>Try a fictional label</button><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading…":"Load demo appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
       </>}
       {p.error&&<div className="alert error" role="alert">{p.error}</div>}
     </div>

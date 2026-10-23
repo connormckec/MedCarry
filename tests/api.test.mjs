@@ -349,8 +349,8 @@ test('clinic submit is idempotent and creates durable inbox receipt',async()=>{
   assert.equal(one.data.received,true);
   assert.equal(one.data.submission.deliveryStatus,'received');
   assert.match(one.data.deliveryLabel,/Received by the clinic/);
-  assert.match(one.data.note,/secure portal inbox/i);
-  assert.doesNotMatch(one.data.note,/email delivery|SMS delivery of the list/i);
+  assert.match(one.data.note,/Received by the clinic/i);
+  assert.doesNotMatch(one.data.note,/email|SMS|share sheet/i);
   assert.equal(one.data.receivingClinic,'Innovation Cardiology');
   const retry=await f.request('clinic/submit','POST',payload);
   assert.equal(retry.status,200);
@@ -377,7 +377,7 @@ test('staff inbox surfaces change and uncertainty counts for the appointment day
   assert.equal(submitted.status,201);
   const inbox=await f.request('clinic/inbox?date=2026-11-03');
   assert.equal(inbox.status,200);
-  assert.match(inbox.data.note||'',/portal inbox/i);
+  assert.match(inbox.data.note||'',/Review a received submission/i);
   assert.equal(inbox.data.appointments.length,1);
   const row=inbox.data.appointments[0];
   assert.equal(row.patientLegalName,'Alice Example');

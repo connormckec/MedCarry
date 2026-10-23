@@ -161,14 +161,16 @@ export function deliveryLabel(status: DeliveryStatus): string {
   return status === "received" ? "Received by the clinic" : "Submitted — waiting for clinic receipt";
 }
 
-/** Patient primary send action — clinic name and portal path live in surrounding copy. */
+/** Patient primary send action — clinic name lives in surrounding copy. */
 export const PATIENT_SEND_CTA = "I'm done — send my list";
 
-/** Short framing under the send button: named clinic + secure portal (not email/SMS). */
-export const PATIENT_SEND_INTRO =
-  "Sends your checked list to Innovation Cardiology through the secure clinic portal — not by text, email, or phone share sheet.";
+/** Short framing under the send button: named clinic only. */
+export const PATIENT_SEND_INTRO = "Send your checked list to Innovation Cardiology.";
 
-/** Receipt helper: durable inbox ack only — never OS share / email / SMS. */
+/**
+ * Receipt helper. "Received" is only for durable inbox ack.
+ * Keep UI copy short — delivery mechanics belong in docs, not screens.
+ */
 export function patientReceiptCopy(status: DeliveryStatus, clinicName: string = RECEIVING_CLINIC_NAME): {
   headline: string;
   detail: string;
@@ -177,20 +179,19 @@ export function patientReceiptCopy(status: DeliveryStatus, clinicName: string = 
   if (status === "received") {
     return {
       headline: "Received by the clinic.",
-      detail: deliveryLabel(status),
-      portalNote: `Your list is in the ${clinicName} staff portal inbox. Staff review and Aprima entry are separate steps. Do not text, email, or use your phone's share sheet to send medication details.`,
+      detail: `${clinicName} has your list.`,
+      portalNote: "",
     };
   }
   return {
-    headline: "List sent to the secure clinic portal.",
+    headline: "List sent.",
     detail: deliveryLabel(status),
-    portalNote: `Waiting for durable receipt in the ${clinicName} portal inbox. A local snapshot or phone share is not clinic delivery.`,
+    portalNote: `Waiting for ${clinicName} to confirm receipt.`,
   };
 }
 
-/** Staff workspace framing — portal inbox is the receive path. */
-export const STAFF_INBOX_INTRO =
-  "Secure clinic portal inbox · Demo records only · Innovation Cardiology · Not email delivery";
+/** Staff workspace framing — named clinic, demo context. */
+export const STAFF_INBOX_INTRO = "Innovation Cardiology · Demo records";
 
 export function staffStatusLabel(status: StaffReviewStatus): string {
   switch (status) {

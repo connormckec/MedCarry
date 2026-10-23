@@ -10,8 +10,9 @@ The intended audience includes patients who need assistance setting up tools suc
 
 | Route | Behavior |
 | --- | --- |
-| `/` | Working private prototype: camera, source upload, browser OCR, manual entry, stored medication records, confirmation, immutable provider-card snapshots |
-| `/patient` | Working guided UI using the same authenticated API and storage; camera, upload, manual entry, review, confirmation and snapshot preparation |
+| `/` | Redirects to `/patient` |
+| `/patient` | Patient medication review only (guided UI): camera, upload, manual entry, review, confirmation, clinic submit. No staff tools. |
+| `/staff` | Staff workspace and clinic portal inbox: import, list switching, testing tools, appointment inbox. Same authenticated API and storage. |
 | `/wireframes` | Clickable design study: 17 screens, text reminder entry, simulated private access and link recovery, first/return visits, example labels, dose editing, manual entry, help, and simulated sharing. All medication state stays in component memory. |
 
 Hosted site: https://medcarry-connor.pearlymap1024.chatgpt.site
