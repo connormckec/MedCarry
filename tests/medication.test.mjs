@@ -22,4 +22,32 @@ test('a taper cannot be flattened into a simple daily dose',()=>{const r=parseLa
 test('PRN intervals and limits stay in label instructions without falsely duplicating actual use',()=>{const r=parseLabel('EXAMPLE MEDICATION 10 MG TABLETS\nTake 1 tablet every 6 hours as needed.\nDo not exceed 4 tablets per day.');assert.equal(r.fields.frequency,'prn');assert.match(r.fields.labelDirections,/every 6 hours/);assert.match(r.fields.labelDirections,/Do not exceed/);assert.equal(r.fields.actualInstructions,'');});
 test('unreadable labels do not invent a drug or a schedule',()=>{const r=parseLabel('PHARMACY\nRx 12345\nPatient Example');assert.equal(r.fields.productName,'');assert.equal(r.fields.strength,'');assert.equal(r.fields.actualDose,'');assert.equal(r.fields.frequency,'unknown');assert.ok(r.notices.length);});
 test('supplement panels retain their text and never get an invented RxNorm code',()=>{const r=parseLabel('EXAMPLE SUPPLEMENT 250 MG\nSupplement Facts\nServing size 2 capsules\nProprietary blend 250 mg');assert.equal(r.fields.category,'supplement');assert.match(r.fields.supplementFacts,/Serving size 2 capsules/);assert.equal(r.fields.rxCui,'');});
+test('split-line pharmacy labels still populate name and strength',()=>{
+  const r=parseLabel('DEMO PHARMACY\nLISINOPRIL\n10 MG\nTABLETS\nTake 1 tablet by mouth once daily.');
+  assert.equal(r.fields.productName,'LISINOPRIL');
+  assert.equal(r.fields.strength,'10 MG');
+  assert.equal(r.fields.actualDose,'1');
+  assert.equal(r.fields.frequency,'daily');
+  assert.ok(r.notices.some(n=>/separate lines/i.test(n)));
+});
+test('OCR-ish wrapped directions still propose reviewable fields',()=>{
+  const r=parseLabel('Qty: 90\nAMLODIPINE BESYLATE 5 MG TABLETS\nTake one tablet by mouth\ndaily with food.\nRefills: 2');
+  assert.equal(r.fields.productName,'AMLODIPINE BESYLATE');
+  assert.equal(r.fields.strength,'5 MG');
+  assert.equal(r.fields.actualDose,'1');
+  assert.equal(r.fields.frequency,'daily');
+  assert.match(r.fields.timing,/with food/i);
+});
+test('labeled Drug Name / Strength fields are used when present',()=>{
+  const r=parseLabel('Drug Name: Carvedilol\nStrength: 12.5 mg\nTake 1 tablet by mouth twice daily.');
+  assert.match(r.fields.productName,/Carvedilol/i);
+  assert.match(r.fields.strength,/12\.5\s*mg/i);
+  assert.equal(r.fields.frequency,'twice');
+});
+test('name without strength stays empty for strength and asks for review',()=>{
+  const r=parseLabel('DEMO PHARMACY\nSOMEFICTIONALMED\nTake as directed.');
+  assert.equal(r.fields.productName,'SOMEFICTIONALMED');
+  assert.equal(r.fields.strength,'');
+  assert.ok(r.notices.some(n=>/strength/i.test(n)));
+});
 test('card text includes full instructions and uncertainty',()=>{const m={...valid(),id:'m',revision:1,confirmedRevision:1,confirmedAt:'2026-10-21T00:00:00Z',actualInstructions:'Take only on the specified days.',uncertaintyNote:'Strength needs confirmation.'};const s=snapshotText({id:'card',patientName:'Fictional record',recipient:'Demo clinic',createdAt:'2026-10-21T00:00:00Z',medications:[m]});assert.match(s,/specified days/);assert.match(s,/Strength needs confirmation/);assert.match(s,/not a prescription/);});

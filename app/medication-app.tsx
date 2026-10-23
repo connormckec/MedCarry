@@ -5,6 +5,7 @@ import { emptyMedication, formulations, frequencies, units, isConfirmed, useSumm
 import type { StaffIdentityHeader } from "@/lib/clinic-identity";
 import { SYNTHETIC } from "@/lib/synthetic-clinic";
 import { recognizeLabels, preparePhoto } from "@/lib/ocr";
+import { ocrExcerpt } from "@/lib/ocr-text";
 import { api } from "@/lib/client-api";
 import { historicalUseProposal } from "@/lib/note-import";
 import { PATIENT_SEND_CTA } from "@/lib/clinic-submission";
@@ -134,7 +135,15 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
     try{const pid=await ensureProfile();const images:Blob[]=[];
       for(let i=0;i<files.length;i++){setProcessMessage(`Saving photo ${i+1} of ${files.length}…`);const image=await preparePhoto(files[i]);const r=await api<{id:string}>(`upload?profile=${pid}`,"POST",image,true);saved.push(r.id);images.push(image);}
       const abort=new AbortController();ocrAbort.current=abort;let fields=emptyMedication();fields.source="photo";let notices:string[]=[];
-      try{const text=await recognizeLabels(images,setProcessMessage,abort.signal);if(text.trim().length<6)throw new Error("No readable text was found. The photos are saved; enter the details from the label.");setProcessMessage("Organizing the label details…");const r=await api<{fields:MedicationFields;notices:string[]}>("parse","POST",{text});fields=r.fields;notices=r.notices;}catch(e){notices=[(e as Error).message,"Your photos are saved. Complete the fields manually before confirming."];}
+      try{
+        const ocr=await recognizeLabels(images,setProcessMessage,abort.signal);
+        if(ocr.text.trim().length<6)throw new Error("No readable text was found. The photos are saved; enter the details from the label.");
+        setProcessMessage("Organizing the label details…");
+        const r=await api<{fields:MedicationFields;notices:string[]}>("parse","POST",{text:ocr.text});
+        fields=r.fields;notices=r.notices;
+        notices.unshift(`Text read from the photo (check against the label): ${ocrExcerpt(ocr.text)}`);
+        if(ocr.weak||!fields.productName.trim())notices.push("The label reader was unsure. Keep what looks right, fix the rest, or mark details unsure before confirming.");
+      }catch(e){notices=[(e as Error).message,"Your photos are saved. Complete the fields manually before confirming."];}
       if(target){fields={...fields,sourceDocument:target.fields.sourceDocument,sourceDate:target.fields.sourceDate,sourceText:target.fields.sourceText};notices.unshift(`New label for the existing entry: ${target.fields.productName} ${target.fields.strength}. Compare the identity and strength before saving.`);}setEditor({fields,sourceIds:[...(target?.sourceIds||[]),...saved],id:target?.id,revision:target?.revision,notices,newSources:[...(target?.newSources||[]),...saved],quick:quickReview(fields)});setFormError("");setMatches([]);setSearchMessage("");opened=true;
     }catch(e){setError((e as Error).message);}finally{setProcessing(false);ocrAbort.current=null;if(!opened)for(const uid of saved){await api(`upload/${uid}`,"DELETE").catch(()=>{});}}
   }

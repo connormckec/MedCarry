@@ -25,7 +25,7 @@ export default function NoteImportPanel({existing,ensureProfile,onSaved,onBusy}:
   function editRow(index:number,key:keyof MedicationFields,value:string){invalidate();setRows(old=>old.map((r,i)=>i===index?{...r,fields:{...r.fields,[key]:value}}:r));}
   function preview(){invalidate();try{setRows(parseMedicationSection(raw,document,sourceDate));setSelected([]);setStep(3);}catch(e){setError((e as Error).message);}}
   function working(value:boolean){setBusy(value);onBusy(value);}
-  async function readImage(file:File){working(true);setError("");try{const photo=await preparePhoto(file);const text=await recognizeLabels([photo],setProgress,new AbortController().signal);setRaw(text);setRows([]);setSelected([]);invalidate();}catch(e){setError((e as Error).message);}finally{working(false);setProgress("");}}
+  async function readImage(file:File){working(true);setError("");try{const photo=await preparePhoto(file);const ocr=await recognizeLabels([photo],setProgress,new AbortController().signal);setRaw(ocr.text);setRows([]);setSelected([]);invalidate();if(ocr.weak&&ocr.text.trim())setError("The label reader was unsure. Check and correct the text before continuing.");}catch(e){setError((e as Error).message);}finally{working(false);setProgress("");}}
   async function importRows(){
     if(!reviewed||!pending.length)return;working(true);setError("");
     try{const profileId=await ensureProfile();if(!requestKey.current)requestKey.current=crypto.randomUUID();

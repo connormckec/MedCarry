@@ -68,7 +68,7 @@ export default function PatientMedicationEditor(p:Props){
         <p className="patient-confirm-copy">Confirm the details, including anything marked unsure.</p>
       </>}
       {f.sourceDocument&&<details className="patient-extra"><summary>From an older record</summary><p className="patient-review-note">{f.sourceDocument} · {f.sourceDate||"Date unknown"}</p><blockquote>{f.sourceText}</blockquote><p className="patient-small">Check what you take now. Reporting a change does not stop a prescription.</p></details>}
-      {p.notices.length>0&&<details className="patient-extra"><summary>Label reader notes</summary>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</details>}
+      {p.notices.length>0&&((!f.productName.trim()||(!f.strength.trim()&&!f.strengthUnknown))?<div className="notice-box" role="status"><strong>Check what the label reader found</strong>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</div>:<details className="patient-extra"><summary>Label reader notes</summary>{p.notices.map((notice,i)=><p className="patient-review-note" key={i}>{notice}</p>)}</details>)}
       {(stepError||p.error)&&<div className="patient-error" role="alert">{stepError||p.error}</div>}
       <details className="patient-extra patient-edit-options"><summary>Change this medication</summary>
         <button className="patient-text" disabled={p.busy} onClick={()=>p.onSave(false)}>Save for later</button>
