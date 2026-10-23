@@ -161,6 +161,33 @@ export function deliveryLabel(status: DeliveryStatus): string {
   return status === "received" ? "Received by the clinic" : "Submitted — waiting for clinic receipt";
 }
 
+/** Patient-facing clinic name for portal send (not email/SMS). */
+export const PATIENT_SEND_CTA = "Send my list to Innovation Cardiology via secure clinic portal";
+
+/** Receipt helper: durable inbox ack only — never OS share / email / SMS. */
+export function patientReceiptCopy(status: DeliveryStatus, clinicName: string = RECEIVING_CLINIC_NAME): {
+  headline: string;
+  detail: string;
+  portalNote: string;
+} {
+  if (status === "received") {
+    return {
+      headline: "Received by the clinic.",
+      detail: deliveryLabel(status),
+      portalNote: `Your list is in the ${clinicName} staff portal inbox. Staff review and Aprima entry are separate steps. Do not text, email, or use your phone's share sheet to send medication details.`,
+    };
+  }
+  return {
+    headline: "List sent to the secure clinic portal.",
+    detail: deliveryLabel(status),
+    portalNote: `Waiting for durable receipt in the ${clinicName} portal inbox. A local snapshot or phone share is not clinic delivery.`,
+  };
+}
+
+/** Staff workspace framing — portal inbox is the receive path. */
+export const STAFF_INBOX_INTRO =
+  "Secure clinic portal inbox · Demo records only · Innovation Cardiology · Not email delivery";
+
 export function staffStatusLabel(status: StaffReviewStatus): string {
   switch (status) {
     case "not_reviewed":

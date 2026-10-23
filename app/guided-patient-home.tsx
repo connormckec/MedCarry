@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { Camera, Check, ChevronRight, LoaderCircle, Pill, ShieldCheck, Upload, WalletCards } from "lucide-react";
 import { isConfirmed, type Medication, type MedicationFields } from "@/lib/medication";
+import { PATIENT_SEND_CTA, patientReceiptCopy } from "@/lib/clinic-submission";
 import "./patient/patient.css";
 
 type ResumeDraft={id:string;medicationId:string|null;updatedAt:string;draft:{fields:Partial<MedicationFields>&{productName?:string};sourceIds:string[]}};
@@ -19,6 +20,7 @@ export default function GuidedPatientHome(p:Props){
   const pending=p.medications.filter(m=>!isConfirmed(m));
   const openDupes=(p.duplicateFlags||[]).filter(f=>f.status==="open");
   const finished=!!p.clinicReceipt;
+  const receipt=p.clinicReceipt?patientReceiptCopy(p.clinicReceipt.deliveryStatus,p.clinicReceipt.receivingClinic):null;
   useEffect(()=>{setAdding(false);},[p.medications]);
   const capture=!finished&&(!p.medications.length||adding);
   function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` ${m.strength}`:""}`:"Medication";}
@@ -28,14 +30,15 @@ export default function GuidedPatientHome(p:Props){
     <section className="patient-body">
       {p.signIn?<div className="patient-access"><h1>Open your list.</h1><p>Sign in with ChatGPT to try this version.</p><a className="patient-primary" href={p.signIn} target="_top">Sign in<ChevronRight size={22}/></a></div>
       :p.loading?<p className="patient-loading" role="status"><LoaderCircle className="spin"/>Opening your list…</p>
-      :finished&&p.clinicReceipt?<>
+      :finished&&receipt&&p.clinicReceipt?<>
         <div className="patient-success"><Check size={34}/></div>
-        <h1>{p.clinicReceipt.deliveryStatus==="received"?"Received by the clinic.":"List sent."}</h1>
-        <p>{p.clinicReceipt.deliveryLabel}</p>
-        <p className="patient-small">Sent to {p.clinicReceipt.receivingClinic}.{p.clinicReceipt.emptyListAttested?" You attested that you take no medications.":""} A saved local copy is not the same as clinic receipt.</p>
-        <button className="patient-primary" disabled={p.processing} onClick={p.onViewReceipt}>View what was sent<ChevronRight size={22}/></button>
+        <h1>{receipt.headline}</h1>
+        <p>{receipt.detail}</p>
+        <p className="patient-small">{receipt.portalNote}{p.clinicReceipt.emptyListAttested?" You attested that you take no medications.":""}</p>
+        <button className="patient-primary" disabled={p.processing} onClick={p.onViewReceipt}>View what the clinic received<ChevronRight size={22}/></button>
         <button className="patient-text" onClick={()=>{setAdding(false);p.onChangeList();}}>Add or change a medication</button>
-      </>:<>
+      </>
+      :<>
         {!capture&&p.resumeDraft&&<button className="patient-secondary" disabled={p.processing} onClick={()=>p.onResumeDraft(p.resumeDraft!)}>Continue unfinished medication{p.resumeDraft.draft.fields.productName?`: ${p.resumeDraft.draft.fields.productName}`:""}<ChevronRight size={21}/></button>}
         {!capture&&openDupes.length>0&&p.onDuplicateRespond&&<div className="patient-duplicate" role="status">
           <h2>{p.duplicatePrompt||"This may already be on your list."}</h2>
@@ -50,8 +53,8 @@ export default function GuidedPatientHome(p:Props){
             <p className="patient-small">Nothing is removed automatically. Both stay on your list until you choose a change.</p>
           </div>)}
         </div>}
-        <h1>{capture?"Add a medication.":pending.length?"Check your medicines.":"Send your list."}</h1>
-        <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time.":"Send your confirmed list to Innovation Cardiology."}</p>
+        <h1>{capture?"Add a medication.":pending.length?"Check your medicines.":"Send to the clinic portal."}</h1>
+        <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time.":"Send your confirmed list through the secure clinic portal — not by text, email, or phone share sheet."}</p>
         {capture?<div className="patient-capture">
           <button className="patient-primary" disabled={p.processing} onClick={p.onCamera}><Camera size={24}/>Take a picture</button>
           <details className="patient-alternatives"><summary>Other ways to add it</summary><button className="patient-secondary" disabled={p.processing} onClick={p.onUpload}><Upload size={21}/>Choose a picture</button><button className="patient-secondary" disabled={p.processing} onClick={p.onManual}>Type it in</button></details>
@@ -59,7 +62,7 @@ export default function GuidedPatientHome(p:Props){
           {!p.medications.length&&<button className="patient-text" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:true})}>I take no medications or supplements</button>}
         </div>:<>
           {pending.length>0?<><div className="patient-count">{p.medications.length-pending.length} of {p.medications.length} checked</div><button className="patient-primary" disabled={p.processing} onClick={()=>p.onReview(pending[0])}>Check next medication<ChevronRight size={22}/></button></>
-          :<button className="patient-primary" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:false})}><Check size={23}/>Send my list to Innovation Cardiology</button>}
+          :<button className="patient-primary" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:false})}><Check size={23}/>{PATIENT_SEND_CTA}</button>}
           <button className="patient-secondary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Add another medication</button>
         </>}
         {p.medications.length>0&&<details className="patient-list"><summary>View my medications ({p.medications.length})</summary>{p.medications.map(m=><button key={m.id} className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}><span className="patient-med-icon"><Pill size={24}/></span><span><strong>{m.productName||"Medication to finish"}</strong><span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span><b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":"Checked"):"Needs checking"}</b></span><ChevronRight size={21}/></button>)}</details>}

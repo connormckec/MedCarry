@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ArrowUpRight, Camera, Check, ChevronRight, FileText, LoaderCircle, Plus, Upload, WalletCards } from "lucide-react";
 import { isConfirmed, canCreateCard, type Medication, type Profile } from "@/lib/medication";
 import type { StaffIdentityHeader } from "@/lib/clinic-identity";
+import { STAFF_INBOX_INTRO } from "@/lib/clinic-submission";
 import "./staff.css";
 
 type CardSummary={id:string;recipient:string;patient_name:string;created_at:string};
@@ -37,15 +38,16 @@ export default function StaffHome(p:Props){
   function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` · ${m.strength}`:""}`:id.slice(0,8);}
   return <main className="staff-home">
     <header className="staff-header"><a className="brand" href="/"><span className="brand-icon"><WalletCards size={22}/></span>MedCarry</a><span className="staff-label">Staff workspace</span></header>
-    <div className="staff-content"><div className="staff-title"><div><h1>{mode==="inbox"?"Today's appointments":"Medication lists"}</h1><p>Test version · Demo records only · Innovation Cardiology</p></div>
-      <div className="staff-mode-switch"><button className={`button ${mode==="inbox"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Inbox</button><button className={`button ${mode==="lists"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>setMode("lists")}>Lists</button></div>
+    <div className="staff-content"><div className="staff-title"><div><h1>{mode==="inbox"?"Clinic portal inbox":"Medication lists"}</h1><p>{mode==="inbox"?STAFF_INBOX_INTRO:"Test version · Local lists · Innovation Cardiology · Portal inbox is the clinical receive path"}</p></div>
+      <div className="staff-mode-switch"><button className={`button ${mode==="inbox"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Portal inbox</button><button className={`button ${mode==="lists"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>setMode("lists")}>Lists</button></div>
     </div>
       {p.signIn?<div className="staff-empty"><h2>Sign in to continue.</h2><a className="button primary" href={p.signIn} target="_top">Sign in with ChatGPT<ChevronRight size={18}/></a></div>
       :p.loading?<p className="loading-state"><LoaderCircle className="spin"/>Opening list…</p>:mode==="inbox"?<>
         <div className="staff-inbox-toolbar">
           <label className="field">Appointment date<input type="date" value={p.inboxDate} onChange={e=>p.onInboxDate(e.target.value)} disabled={p.inboxBusy||p.busy}/></label>
-          <button className="button secondary" disabled={p.inboxBusy||p.busy} onClick={p.onLoadInbox}>{p.inboxBusy?"Loading…":"Refresh inbox"}</button>
+          <button className="button secondary" disabled={p.inboxBusy||p.busy} onClick={p.onLoadInbox}>{p.inboxBusy?"Loading…":"Refresh portal inbox"}</button>
         </div>
+        <p className="staff-uncertainty">Patient lists arrive here after durable portal receipt — not by email attachment, SMS of the list, or phone share sheet.</p>
         {header&&<section className="staff-identity-header" aria-label="Patient identity for this appointment">
           <div className="staff-identity-kicker">Protected patient detail · synthetic fixture</div>
           <div className="staff-identity-grid">
