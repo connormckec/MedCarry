@@ -87,47 +87,179 @@ export function reportedAmount(m: MedicationFields): string | null {
   return null;
 }
 
+const strengthPattern = /\b\d+(?:\.\d+)?\s*(?:mcg|mg|grams?|g|IU|units?|%)(?:\s*\/\s*(?:\d+(?:\.\d+)?\s*)?(?:mL|ml|tablet|capsule))?\b/i;
+const isInstructionLine = (l: string) => /^(?:directions\s*:?\s*)?(?:take|give|use|inject|inhale|apply|instill|chew|dissolve)\b/i.test(l);
+const isPharmacyNoise = (l: string) =>
+  /^(?:rx\s*#|npi|dea|refill|prescriber|pharmac|qty\s*:|quantity|discard|expir|tel\.?|phone|www\.|https?:|\d{3}[- .]\d{3}|patient\b|dob\b|dr\.?\s)/i.test(l) ||
+  /\bpharmacy\b/i.test(l) ||
+  /^(?:fictional label|for product testing|demo label)\b/i.test(l);
+const isStrengthOnly = (l: string) => {
+  const stripped = l.replace(strengthPattern, "").replace(/\b(?:tablets?|tabs?|capsules?|caps?|oral|usp|each)\b/gi, "").replace(/[\s:.,#-]+/g, "");
+  return strengthPattern.test(l) && stripped.length < 2;
+};
+const cleanProductName = (value: string) =>
+  value
+    .replace(strengthPattern, "")
+    .replace(/\b(?:tablets?|tabs?|capsules?|caps?|oral|USP|qty\s*:?\s*\d+)\b/gi, "")
+    .replace(/^(?:drug|medication|medicine|product)\s*name\s*:?\s*/i, "")
+    .replace(/^[\s:.,#-]+|[\s:.,#-]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 180);
+
 export function parseLabel(raw: string): { fields: MedicationFields; notices: string[] } {
-  const text = raw.slice(0,12000).replace(/\r/g, ""); const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
-  const fields = emptyMedication(); fields.source = "photo"; const notices: string[] = [];
-  const strengthPattern = /\b\d+(?:\.\d+)?\s*(?:mcg|mg|grams?|g|IU|units?|%)(?:\s*\/\s*(?:\d+(?:\.\d+)?\s*)?(?:mL|tablet|capsule))?\b/i;
-  const isInstruction = (l: string) => /^(?:directions\s*:?\s*)?(?:take|give|use|inject|inhale|apply|instill|chew|dissolve)\b/i.test(l);
-  const candidate = lines.find(l => strengthPattern.test(l) && !isInstruction(l) && !/^(?:each|dose|serving|amount|contains|per\b|active ingredient|supplement facts)/i.test(l));
-  if (candidate) {
-    fields.strength = candidate.match(strengthPattern)?.[0] || "";
-    fields.productName = candidate.replace(strengthPattern, "").replace(/\b(?:tablets?|tabs?|capsules?|caps?|oral|USP|qty\s*:?\s*\d+)\b/gi, "").replace(/^[\s:.,-]+|[\s:.,-]+$/g, "").replace(/\s+/g, " ").slice(0,180);
-  } else notices.push("The product name or strength could not be read. Enter them from the label.");
-  const i = lines.findIndex(isInstruction);
-  if (i >= 0) {
-    fields.labelDirections = lines.slice(i,i+3).filter((l,n)=>n===0 || !/^(?:refill|prescriber|pharmac|rx\s*#|discard|expir|quantity|qty|\d{3}[- .]\d{3})/i.test(l)).join(" ").slice(0,1600);
+  const text = raw.slice(0, 12000).replace(/\r/g, "");
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const fields = emptyMedication();
+  fields.source = "photo";
+  const notices: string[] = [];
+
+  const labeledName = lines.map((l) => l.match(/^(?:drug|medication|medicine|product)\s*name\s*:?\s*(.+)$/i)).find(Boolean);
+  const labeledStrength = lines.map((l) => l.match(/^strength\s*:?\s*(.+)$/i)).find(Boolean);
+
+  // Prefer a single line with both name + strength (classic bottle OCR).
+  let candidate =
+    lines.find(
+      (l) =>
+        strengthPattern.test(l) &&
+        !isInstructionLine(l) &&
+        !isStrengthOnly(l) &&
+        !isPharmacyNoise(l) &&
+        !/^(?:each|dose|serving|amount|contains|per\b|active ingredient|supplement facts|strength\b)/i.test(l),
+    ) || "";
+
+  // Common pharmacy layout: product on one line, strength on the next.
+  if (!candidate) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!strengthPattern.test(line) || isInstructionLine(line) || isPharmacyNoise(line)) continue;
+      if (isStrengthOnly(line) && i > 0) {
+        const prev = lines[i - 1];
+        if (!isInstructionLine(prev) && !isPharmacyNoise(prev) && !strengthPattern.test(prev) && prev.length >= 3) {
+          candidate = `${prev} ${line}`;
+          notices.push("Name and strength were on separate lines in the photo. Check both against the bottle.");
+          break;
+        }
+      }
+    }
   }
-  const combined = `${candidate || ""} ${fields.labelDirections}`;
-  if (/\b(?:inhale|inhaler|puffs?)\b/i.test(combined)) { fields.formulation="inhaler";fields.doseUnit="puffs"; }
-  else if (/\b(?:inject|injection)\b/i.test(combined)) { fields.formulation="injection";fields.doseUnit="units"; }
-  else if (/\b(?:apply|cream|ointment|gel)\b/i.test(combined)) { fields.formulation="topical";fields.doseUnit="applications"; }
-  else if (/\b(?:patch)\b/i.test(combined)) { fields.formulation="patch";fields.doseUnit="patches"; }
-  else if (/\b(?:drops?|instill)\b/i.test(combined)) { fields.formulation="drops";fields.doseUnit="drops"; }
-  else if (/\b(?:mL|solution|suspension)\b/i.test(combined)) { fields.formulation="liquid";fields.doseUnit="mL"; }
-  else if (/\b(?:capsules?|caps?)\b/i.test(combined)) { fields.formulation="capsule";fields.doseUnit="capsules"; }
-  if (/\b(?:by mouth|orally)\b/i.test(fields.labelDirections)) fields.route="By mouth";
-  const directions=fields.labelDirections.toLowerCase();
-  const amount = directions.match(/\b(?:take|give|use|inject|inhale|apply|instill|chew|dissolve)\s+(one-half|one half|half|one|two|three|four|\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*(?:tablets?|tabs?|capsules?|caps?|m[l1]|puffs?|units?|patch(?:es)?|drops?|scoops?)\b/);
-  if (amount) { const words: Record<string,string>={"one-half":"0.5","one half":"0.5",half:"0.5",one:"1",two:"2",three:"3",four:"4"}; fields.actualDose=words[amount[1]] || amount[1].replace(/\s/g,""); }
-  if (/\b(?:as needed|when needed|prn)\b/.test(directions)) fields.frequency="prn";
-  else if (/\b(?:every other day|alternate days)\b/.test(directions)) fields.frequency="alternate";
-  else if (/\b(?:once (?:a )?week|weekly|every week)\b/.test(directions)) fields.frequency="weekly";
-  else if (/\b(?:four times|4 times|qid)\b/.test(directions)) fields.frequency="four";
-  else if (/\b(?:three times|3 times|tid)\b/.test(directions)) fields.frequency="three";
-  else if (/\b(?:twice|two times|2 times|bid)\b/.test(directions)) fields.frequency="twice";
-  else if (/\b(?:daily|every day|once a day|once per day|qd)\b/.test(directions)) fields.frequency="daily";
-  const complex = /\b(?:then|taper|except|alternat(?:e|ing) doses?|for \d+ days?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(directions) || (!/as needed|prn/.test(directions) && /every\s+\d+\s+hours?/.test(directions));
-  if (complex) { fields.frequency="custom";fields.actualDose="";notices.push("This schedule needs a manual check. Preserve the full instructions, including dates or different doses."); }
-  fields.actualInstructions=complex?fields.labelDirections:"";
-  fields.timing = ["morning", "evening", "bedtime", "with food", "with meals", "before meals", "on an empty stomach"].filter(s=>directions.includes(s)).join(", ");
-  if (/supplement facts/i.test(text)) { fields.category="supplement";fields.supplementFacts=text.slice(text.toLowerCase().indexOf("supplement facts"),text.toLowerCase().indexOf("supplement facts")+2500); fields.rxCui="";notices.push("Check the serving size and ingredient panel. Suggested label use is not evidence of your actual use."); }
+
+  if (labeledName?.[1]) fields.productName = cleanProductName(labeledName[1]);
+  if (labeledStrength?.[1]) {
+    fields.strength = labeledStrength[1].match(strengthPattern)?.[0] || cleanProductName(labeledStrength[1]).slice(0, 100);
+  }
+
+  if (candidate) {
+    if (!fields.strength) fields.strength = candidate.match(strengthPattern)?.[0] || "";
+    if (!fields.productName) fields.productName = cleanProductName(candidate);
+  } else if (!fields.productName) {
+    // Last resort: a medicine-like line without a readable strength — never invent strength.
+    const nameGuess = lines.find(
+      (l) =>
+        !isInstructionLine(l) &&
+        !isPharmacyNoise(l) &&
+        !/^(?:each|dose|serving|amount|contains|per\b|active ingredient|supplement facts|strength\b)/i.test(l) &&
+        /[A-Za-z]{3,}/.test(l) &&
+        l.length >= 4 &&
+        l.length <= 80,
+    );
+    if (nameGuess) {
+      fields.productName = cleanProductName(nameGuess);
+      notices.push("A possible product name was found without a clear strength. Enter the strength from the label, or mark it unsure.");
+    } else {
+      notices.push("The product name or strength could not be read. Enter them from the label.");
+    }
+  }
+
+  if (fields.productName && !fields.strength) {
+    notices.push("Strength was not readable. Enter it from the label, or mark it as not known.");
+  }
+
+  const i = lines.findIndex(isInstructionLine);
+  if (i >= 0) {
+    fields.labelDirections = lines
+      .slice(i, i + 4)
+      .filter((l, n) => n === 0 || !isPharmacyNoise(l))
+      .join(" ")
+      .slice(0, 1600);
+  } else {
+    // OCR sometimes drops the leading verb onto the previous wrap.
+    const soft = lines.findIndex((l) => /\b(?:by mouth|twice daily|once daily|as needed|every \d+ hours?)\b/i.test(l) && !isPharmacyNoise(l));
+    if (soft >= 0) {
+      fields.labelDirections = lines.slice(Math.max(0, soft - 1), soft + 3).join(" ").slice(0, 1600);
+      notices.push("Directions may be incomplete. Compare them to the label before confirming.");
+    }
+  }
+
+  const combined = `${candidate || fields.productName} ${fields.strength} ${fields.labelDirections}`;
+  if (/\b(?:inhale|inhaler|puffs?)\b/i.test(combined)) {
+    fields.formulation = "inhaler";
+    fields.doseUnit = "puffs";
+  } else if (/\b(?:inject|injection)\b/i.test(combined)) {
+    fields.formulation = "injection";
+    fields.doseUnit = "units";
+  } else if (/\b(?:apply|cream|ointment|gel)\b/i.test(combined)) {
+    fields.formulation = "topical";
+    fields.doseUnit = "applications";
+  } else if (/\b(?:patch)\b/i.test(combined)) {
+    fields.formulation = "patch";
+    fields.doseUnit = "patches";
+  } else if (/\b(?:drops?|instill)\b/i.test(combined)) {
+    fields.formulation = "drops";
+    fields.doseUnit = "drops";
+  } else if (/\b(?:mL|ml|solution|suspension)\b/i.test(combined)) {
+    fields.formulation = "liquid";
+    fields.doseUnit = "mL";
+  } else if (/\b(?:capsules?|caps?)\b/i.test(combined)) {
+    fields.formulation = "capsule";
+    fields.doseUnit = "capsules";
+  }
+  if (/\b(?:by mouth|orally)\b/i.test(fields.labelDirections)) fields.route = "By mouth";
+  const directions = fields.labelDirections.toLowerCase();
+  const amount = directions.match(
+    /\b(?:take|give|use|inject|inhale|apply|instill|chew|dissolve)\s+(one-half|one half|half|one|two|three|four|\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*(?:tablets?|tabs?|capsules?|caps?|m[l1]|puffs?|units?|patch(?:es)?|drops?|scoops?)\b/,
+  );
+  if (amount) {
+    const words: Record<string, string> = {
+      "one-half": "0.5",
+      "one half": "0.5",
+      half: "0.5",
+      one: "1",
+      two: "2",
+      three: "3",
+      four: "4",
+    };
+    fields.actualDose = words[amount[1]] || amount[1].replace(/\s/g, "");
+  }
+  if (/\b(?:as needed|when needed|prn)\b/.test(directions)) fields.frequency = "prn";
+  else if (/\b(?:every other day|alternate days)\b/.test(directions)) fields.frequency = "alternate";
+  else if (/\b(?:once (?:a )?week|weekly|every week)\b/.test(directions)) fields.frequency = "weekly";
+  else if (/\b(?:four times|4 times|qid)\b/.test(directions)) fields.frequency = "four";
+  else if (/\b(?:three times|3 times|tid)\b/.test(directions)) fields.frequency = "three";
+  else if (/\b(?:twice|two times|2 times|bid)\b/.test(directions)) fields.frequency = "twice";
+  else if (/\b(?:daily|every day|once a day|once per day|qd)\b/.test(directions)) fields.frequency = "daily";
+  const complex =
+    /\b(?:then|taper|except|alternat(?:e|ing) doses?|for \d+ days?|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(directions) ||
+    (!/as needed|prn/.test(directions) && /every\s+\d+\s+hours?/.test(directions));
+  if (complex) {
+    fields.frequency = "custom";
+    fields.actualDose = "";
+    notices.push("This schedule needs a manual check. Preserve the full instructions, including dates or different doses.");
+  }
+  fields.actualInstructions = complex ? fields.labelDirections : "";
+  fields.timing = ["morning", "evening", "bedtime", "with food", "with meals", "before meals", "on an empty stomach"]
+    .filter((s) => directions.includes(s))
+    .join(", ");
+  if (/supplement facts/i.test(text)) {
+    fields.category = "supplement";
+    fields.supplementFacts = text.slice(text.toLowerCase().indexOf("supplement facts"), text.toLowerCase().indexOf("supplement facts") + 2500);
+    fields.rxCui = "";
+    notices.push("Check the serving size and ingredient panel. Suggested label use is not evidence of your actual use.");
+  }
   if (!fields.labelDirections) notices.push("Directions were not readable. Enter your current use, or explicitly mark it as uncertain.");
   if (!fields.actualDose && !complex) notices.push("The amount per dose needs your review.");
-  if (lines.filter(l=>strengthPattern.test(l)&&!isInstruction(l)).length>2) notices.push("Check that these photos show one product. Separate medications need separate entries.");
+  if (lines.filter((l) => strengthPattern.test(l) && !isInstructionLine(l)).length > 2) {
+    notices.push("Check that these photos show one product. Separate medications need separate entries.");
+  }
   return { fields, notices };
 }
 
