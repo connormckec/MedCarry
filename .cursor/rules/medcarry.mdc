@@ -1,0 +1,16 @@
+---
+description: MedCarry product, patient experience, and data safety conventions
+alwaysApply: true
+---
+
+This repository contains MedCarry: a private medication capture prototype and separate interactive wireframes. Read AGENTS.md and docs/CURSOR_HANDOFF.md at the start of a task.
+
+Design for patients who struggle with phone setup. Use simple words, one primary action per step, large text, 60px primary actions, and accessible alternatives to photography. Keep technical implementation details outside patient screens.
+
+Keep medication identity/strength, label directions, and patient-reported use separate. Photographs do not prove ingestion or current use. Never recommend dose changes or tablet splitting. Do not guess missing clinical fields.
+
+Preserve server-side ownership, revision checks, explicit current-revision confirmation, and immutable snapshot creation. Any edit requires reconfirmation. No authentication bypasses.
+
+Keep `/wireframes` in-memory and clearly labeled as a demo. It must not call the medication API, upload source photos to the server, or send anything to a clinic. Do not claim unimplemented integrations or clinical readiness.
+
+Prefer the current React/TypeScript/Vinext/Workers architecture. Keep secrets, patient data, generated builds, and local runtime state out of Git. Run appropriate checks from AGENTS.md and accurately report verification limits.
