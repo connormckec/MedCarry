@@ -220,11 +220,21 @@ export function parseLabel(raw: string): { fields: MedicationFields; notices: st
   fields.timing = proposed.timing;
   fields.actualInstructions = proposed.actualInstructions;
   notices.push(...proposed.notices);
-  if (/supplement facts/i.test(text)) {
+  if (/supplement facts|dietary supplement/i.test(text)) {
     fields.category = "supplement";
-    fields.supplementFacts = text.slice(text.toLowerCase().indexOf("supplement facts"), text.toLowerCase().indexOf("supplement facts") + 2500);
+    const idx = text.toLowerCase().search(/supplement facts|dietary supplement/);
+    fields.supplementFacts = idx >= 0 ? text.slice(idx, idx + 2500) : fields.supplementFacts;
     fields.rxCui = "";
     notices.push("Check the serving size and ingredient panel. Suggested label use is not evidence of your actual use.");
+  } else if (/\b(?:otc|over[\s-]?the[\s-]?counter|nonprescription|non-prescription)\b/i.test(text)) {
+    fields.category = "otc";
+  } else if (
+    /\b(?:vitamin|multivitamin|omega[\s-]?3|fish oil|probiotic|herbal)\b/i.test(text) &&
+    !/\b(?:rx\s*#|prescription|prescriber)\b/i.test(text)
+  ) {
+    // Propose supplement only for vitamin/mineral language — do not classify every nonprescription as supplement.
+    fields.category = "supplement";
+    notices.push("This may be a vitamin or supplement. Confirm the type before finishing.");
   }
   if (!fields.labelDirections) notices.push("Directions were not readable. Enter your current use, or explicitly mark it as uncertain.");
   else if (!fields.actualDose && proposed.frequency !== "custom") notices.push("The amount per dose needs your review.");

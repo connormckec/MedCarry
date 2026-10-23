@@ -12,6 +12,8 @@ import * as rxnorm from '../lib/rxnorm.ts';
 import * as rxnormStore from '../lib/rxnorm-store.ts';
 import * as clinicSubmission from '../lib/clinic-submission.ts';
 import * as clinicSubmissionStore from '../lib/clinic-submission-store.ts';
+import * as labelResolve from '../lib/label-resolve.ts';
+import * as dsld from '../lib/dsld.ts';
 import {LOCAL_MOCK_PRINCIPAL_ID,SYNTHETIC,SYNTHETIC_HELPER_PRINCIPAL_ID,SYNTHETIC_PATIENT_PRINCIPAL_ID} from '../lib/synthetic-clinic.ts';
 const source=readFileSync(new URL('../app/api/[...path]/route.ts',import.meta.url),'utf8');
 const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace(/^import .*;\n/gm,'').replace(/^export /gm,'');
@@ -43,6 +45,9 @@ function fixture(){
     getStaffIdentityHeader:clinicApi.getStaffIdentityHeader,
     ClinicIdentityError:clinicIdentity.ClinicIdentityError,
     proposePatientMatch:clinicIdentity.proposePatientMatch,
+    normalizeLegalName:clinicIdentity.normalizeLegalName,
+    normalizePostalCode:clinicIdentity.normalizePostalCode,
+    parseDateOnly:clinicIdentity.parseDateOnly,
     AuthzError:clinicAuthz.AuthzError,
     assertStaffToolsAllowed:clinicAuthz.assertStaffToolsAllowed,
     authorizeProfileAccess:clinicAuthz.authorizeProfileAccess,
@@ -56,6 +61,8 @@ function fixture(){
     ...rxnormStore,
     ...clinicSubmission,
     ...clinicSubmissionStore,
+    ...labelResolve,
+    ...dsld,
   };
   const names=['env','getChatGPTUser','chatGPTSignInPath',...Object.keys(medicationLogic),...Object.keys(clinicBindings)];
   const values=[{DB,BUCKET},async()=>user,()=>'/signin-with-chatgpt?return_to=%2F',...Object.values(medicationLogic),...Object.values(clinicBindings)];
@@ -70,6 +77,15 @@ function fixture(){
 }
 const valid=()=>({...medicationLogic.emptyMedication(),productName:'Fictional tablet',strength:'25 mg',actualDose:'1',frequency:'daily'});
 async function setup(f){const p=await f.request('profile','POST',{name:'Fictional list'});assert.equal(p.status,201);return p.data.profile.id;}
+/** Profile linked to a clinic patient — required before note import. */
+async function setupLinked(f){
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  const seeded=await f.request('clinic/seed-synthetic','POST',{});
+  assert.ok(seeded.status===201||seeded.status===200);
+  const created=await f.request('clinic/patients','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Import Example',dob:'1950-01-15'});
+  assert.equal(created.status,201);
+  return {profileId:created.data.profile.id,patientId:created.data.patient.id};
+}
 async function add(f,p,fields=valid(),sourceIds=[]){const r=await f.request('medication','POST',{profileId:p,fields,sourceIds});assert.equal(r.status,201);return r.data.medication;}
 test('all record APIs require authenticated request identity',async()=>{const f=fixture();f.setUser(null);assert.equal((await f.request('bootstrap')).status,401);assert.equal((await f.request('profile','POST',{name:'x'})).status,401);f.sqlite.close();});
 test('cross-origin mutations are blocked',async()=>{const f=fixture();assert.equal((await f.request('profile','POST',{name:'x'},{Origin:'https://other.test'})).status,403);f.sqlite.close();});
@@ -81,12 +97,36 @@ test('unsupported files and declared oversized bodies are rejected',async()=>{co
 test('photos and medication records cannot cross patient-list boundaries',async()=>{const f=fixture(),p=await setup(f);const p2=(await f.request('profile','POST',{name:'Other list'})).data.profile.id;const image=await f.request('upload?profile='+p,'POST',new Uint8Array([255,216,255,0,0,0,0,0,0,0,0,0]));const r=await f.request('medication','POST',{profileId:p2,fields:valid(),sourceIds:[image.data.id]});assert.equal(r.status,400);f.sqlite.close();});
 test('saved photos cannot be silently removed and cross-owner reads are denied',async()=>{const f=fixture(),p=await setup(f);const image=await f.request('upload?profile='+p,'POST',new Uint8Array([255,216,255,0,0,0,0,0,0,0,0,0]));const m=await add(f,p,valid(),[image.data.id]);assert.equal((await f.request('upload/'+image.data.id,'DELETE')).status,409);f.setUser({userId:'other',email:'other@example.test'});assert.equal((await f.request('list?profile='+p)).status,404);assert.equal((await f.request('confirm/'+m.id,'POST',{revision:1,acknowledged:true})).status,404);assert.equal((await f.request('medication/'+m.id,'DELETE',{revision:1})).status,404);f.sqlite.close();});
 const importBody=(p,changes={})=>({profileId:p,sourceDocument:'Fictional prior note',sourceDate:'2026-07-01',reviewed:true,idempotencyKey:crypto.randomUUID(),rows:[{...valid(),sourceText:'Fictional tablet 25 mg; take 1 tablet daily.'}],...changes});
-test('note import forces historical uncertainty and leaves all entries unconfirmed',async()=>{const f=fixture(),p=await setup(f);const r=await f.request('note-import','POST',importBody(p));assert.equal(r.status,201);const list=await f.request('list?profile='+p);const m=list.data.medications[0];assert.equal(m.source,'note');assert.equal(m.sourceDate,'2026-07-01');assert.equal(m.actualUseUnknown,true);assert.equal(m.status,'unsure');assert.equal(m.actualDose,'');assert.equal(m.labelDirections,'');assert.equal(m.confirmedRevision,null);assert.equal((await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()})).status,409);f.sqlite.close();});
-test('repeating an import is idempotent and changed content conflicts',async()=>{const f=fixture(),p=await setup(f),payload=importBody(p);const one=await f.request('note-import','POST',payload);const retry=await f.request('note-import','POST',payload);assert.equal(retry.status,200);assert.deepEqual(one.data.ids,retry.data.ids);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);assert.equal((await f.request('note-import','POST',{...payload,sourceDate:'2026-08-01'})).status,409);f.sqlite.close();});
-test('import duplicate detection and date validation happen before any writes',async()=>{const f=fixture(),p=await setup(f);const payload=importBody(p);assert.equal((await f.request('note-import','POST',{...payload,sourceDate:'2026-02-30'})).status,400);assert.equal((await f.request('note-import','POST',{...payload,rows:[payload.rows[0],payload.rows[0]]})).status,409);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,0);await add(f,p);assert.equal((await f.request('note-import','POST',payload)).status,409);f.sqlite.close();});
-test('imports require staff review and cannot cross owner or profile boundaries',async()=>{const f=fixture(),p=await setup(f);assert.equal((await f.request('note-import','POST',importBody(p,{reviewed:false}))).status,400);assert.equal((await f.request('note-import','POST',importBody(p,{rows:Array(21).fill(valid())}))).status,400);f.setUser({userId:'other',email:'other@example.test'});assert.equal((await f.request('note-import','POST',importBody(p))).status,404);f.setUser(null);assert.equal((await f.request('note-import','POST',importBody(p))).status,401);f.sqlite.close();});
-test('a database failure rolls back imported rows and its idempotency reservation',async()=>{const f=fixture(),p=await setup(f);f.sqlite.exec("CREATE TRIGGER reject_import BEFORE INSERT ON medications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");const payload=importBody(p);assert.equal((await f.request('note-import','POST',payload)).status,500);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM note_imports').get().n,0);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,0);f.sqlite.exec('DROP TRIGGER reject_import');assert.equal((await f.request('note-import','POST',payload)).status,201);f.sqlite.close();});
-test('imported medicine can receive a photo and current report without losing historical evidence',async()=>{const f=fixture(),p=await setup(f);const imported=await f.request('note-import','POST',importBody(p));const mid=imported.data.ids[0];const photo=await f.request('upload?profile='+p,'POST',new Uint8Array([255,216,255,0,0,0,0,0,0,0,0,0]));const before=(await f.request('list?profile='+p)).data.medications[0];const updated=await f.request('medication/'+mid,'PUT',{revision:1,sourceIds:[photo.data.id],fields:{...before,source:'photo',sourceDate:'2026-10-22',sourceText:'This must not replace the original evidence',status:'taking',actualUseUnknown:false,actualDose:'1/2',frequency:'daily'}});assert.equal(updated.status,200);assert.equal(updated.data.medication.sourceText,before.sourceText);assert.equal(updated.data.medication.sourceDate,'2026-07-01');assert.equal(updated.data.medication.revision,2);assert.equal((await f.request('confirm/'+mid,'POST',{revision:1,acknowledged:true})).status,409);assert.equal((await f.request('confirm/'+mid,'POST',{revision:2,acknowledged:true})).status,200);const made=await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()});assert.equal(made.status,201);const snapshot=await f.request('card/'+made.data.id);assert.equal(snapshot.data.card.medications[0].actualDose,'1/2');assert.equal(snapshot.data.card.medications[0].sourceDate,'2026-07-01');assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);f.sqlite.close();});
+test('note import forces historical uncertainty and leaves all entries unconfirmed',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f);const r=await f.request('note-import','POST',importBody(p,{patientId}));assert.equal(r.status,201);const list=await f.request('list?profile='+p);const m=list.data.medications[0];assert.equal(m.source,'note');assert.equal(m.sourceDate,'2026-07-01');assert.equal(m.actualUseUnknown,true);assert.equal(m.status,'unsure');assert.equal(m.actualDose,'');assert.equal(m.labelDirections,'');assert.equal(m.confirmedRevision,null);assert.equal((await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()})).status,409);f.sqlite.close();});
+test('note import is blocked without a linked clinic patient',async()=>{const f=fixture(),p=await setup(f);const r=await f.request('note-import','POST',importBody(p));assert.equal(r.status,400);assert.match(r.data.error,/linked medication list|Select or create/i);f.sqlite.close();});
+test('note import rejects a mismatched patientId',async()=>{const f=fixture(),{profileId:p}=await setupLinked(f);const wrong=await f.request('note-import','POST',importBody(p,{patientId:SYNTHETIC.patients.bob.id}));assert.equal(wrong.status,400);assert.match(wrong.data.error,/different patient/i);f.sqlite.close();});
+test('repeating an import is idempotent and changed content conflicts',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f),payload=importBody(p,{patientId});const one=await f.request('note-import','POST',payload);const retry=await f.request('note-import','POST',payload);assert.equal(retry.status,200);assert.deepEqual(one.data.ids,retry.data.ids);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);assert.equal((await f.request('note-import','POST',{...payload,idempotencyKey:crypto.randomUUID(),sourceDate:'2026-08-01'})).status,409);f.sqlite.close();});
+test('import duplicate detection and date validation happen before any writes',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f);const payload=importBody(p,{patientId});assert.equal((await f.request('note-import','POST',{...payload,sourceDate:'2026-02-30'})).status,400);assert.equal((await f.request('note-import','POST',{...payload,rows:[payload.rows[0],payload.rows[0]]})).status,409);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,0);await add(f,p);assert.equal((await f.request('note-import','POST',{...payload,idempotencyKey:crypto.randomUUID()})).status,409);f.sqlite.close();});
+test('imports require staff review and cannot cross owner or profile boundaries',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f);assert.equal((await f.request('note-import','POST',importBody(p,{patientId,reviewed:false}))).status,400);assert.equal((await f.request('note-import','POST',importBody(p,{patientId,rows:Array(21).fill(valid())}))).status,400);f.setUser({userId:'other',email:'other@example.test'});assert.equal((await f.request('note-import','POST',importBody(p,{patientId}))).status,404);f.setUser(null);assert.equal((await f.request('note-import','POST',importBody(p,{patientId}))).status,401);f.sqlite.close();});
+test('a database failure rolls back imported rows and its idempotency reservation',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f);f.sqlite.exec("CREATE TRIGGER reject_import BEFORE INSERT ON medications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");const payload=importBody(p,{patientId});assert.equal((await f.request('note-import','POST',payload)).status,500);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM note_imports').get().n,0);assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,0);f.sqlite.exec('DROP TRIGGER reject_import');assert.equal((await f.request('note-import','POST',payload)).status,201);f.sqlite.close();});
+test('imported medicine can receive a photo and current report without losing historical evidence',async()=>{const f=fixture(),{profileId:p,patientId}=await setupLinked(f);const imported=await f.request('note-import','POST',importBody(p,{patientId}));const mid=imported.data.ids[0];const photo=await f.request('upload?profile='+p,'POST',new Uint8Array([255,216,255,0,0,0,0,0,0,0,0,0]));const before=(await f.request('list?profile='+p)).data.medications[0];const updated=await f.request('medication/'+mid,'PUT',{revision:1,sourceIds:[photo.data.id],fields:{...before,source:'photo',sourceDate:'2026-10-22',sourceText:'This must not replace the original evidence',status:'taking',actualUseUnknown:false,actualDose:'1/2',frequency:'daily'}});assert.equal(updated.status,200);assert.equal(updated.data.medication.sourceText,before.sourceText);assert.equal(updated.data.medication.sourceDate,'2026-07-01');assert.equal(updated.data.medication.revision,2);assert.equal((await f.request('confirm/'+mid,'POST',{revision:1,acknowledged:true})).status,409);assert.equal((await f.request('confirm/'+mid,'POST',{revision:2,acknowledged:true})).status,200);const made=await f.request('card','POST',{profileId:p,recipient:'Demo',patientName:'Fictional',idempotencyKey:crypto.randomUUID()});assert.equal(made.status,201);const snapshot=await f.request('card/'+made.data.id);assert.equal(snapshot.data.card.medications[0].actualDose,'1/2');assert.equal(snapshot.data.card.medications[0].sourceDate,'2026-07-01');assert.equal(f.sqlite.prepare('SELECT count(*) n FROM medications').get().n,1);f.sqlite.close();});
+test('staff patient create links a medication list and does not auto-merge on name/DOB',async()=>{
+  const f=fixture();
+  f.setUser({userId:LOCAL_MOCK_PRINCIPAL_ID,email:'seedy@sites.test',fullName:'Seedy'});
+  await f.request('clinic/seed-synthetic','POST',{});
+  const a=await f.request('clinic/patients','POST',{practiceId:SYNTHETIC.practiceId,legalName:'Alice Example',dob:'1948-03-12'});
+  assert.equal(a.status,201);
+  assert.ok(a.data.profile.id);
+  assert.notEqual(a.data.patient.id,SYNTHETIC.patients.aliceA.id);
+  const list=await f.request(`clinic/patients?practiceId=${SYNTHETIC.practiceId}`);
+  assert.equal(list.status,200);
+  assert.ok(list.data.patients.some(pt=>pt.id===a.data.patient.id&&pt.profileId===a.data.profile.id));
+  f.sqlite.close();
+});
+test('parse resolves misspelled OCR into draft fields for the patient photo path',async()=>{
+  const f=fixture(),p=await setup(f);
+  const r=await f.request('parse','POST',{text:'DEMO PHARMACY\nMETOPROLOL TARTRTE 50 MG TABLETS\nTake 1 tablet by mouth twice daily.',profileId:p});
+  assert.equal(r.status,200);
+  assert.match(r.data.fields.productName,/Metoprolol Tartrate/i);
+  assert.equal(r.data.spellingCorrected,true);
+  assert.match(r.data.fields.strength,/50/i);
+  f.sqlite.close();
+});
 test('synthetic clinic seed is limited to the local mock principal',async()=>{
   const f=fixture();
   assert.equal((await f.request('clinic/seed-synthetic','POST',{})).status,403);

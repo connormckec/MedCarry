@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser, chatGPTSignInPath } from "@/app/chatgpt-auth";
-import { MedicationValidationError, emptyMedication, validateFields, parseLabel, canCreateCard, type Medication, type MedicationFields } from "@/lib/medication";
+import { MedicationValidationError, emptyMedication, validateFields, canCreateCard, type Medication, type MedicationFields } from "@/lib/medication";
 import { ClinicApiError, ensureSyntheticClinic, getStaffIdentityHeader } from "@/lib/clinic-api";
-import { ClinicIdentityError, proposePatientMatch, type PatientRecord } from "@/lib/clinic-identity";
+import { ClinicIdentityError, normalizeLegalName, normalizePostalCode, parseDateOnly, proposePatientMatch, type PatientRecord } from "@/lib/clinic-identity";
+import { liveQueryFromDraft, resolveLabelDraft, type PriorMedHint } from "@/lib/label-resolve";
+import { buildDsldProductQuery, searchDsldProducts, DSLD_API_VERSION, DSLD_DOCS_URL, DsldError } from "@/lib/dsld";
 import {
   AuthzError,
   assertStaffToolsAllowed,
@@ -23,6 +25,7 @@ import {
   patientDuplicatePrompt,
   applyTerminologyToFields,
   terminologyForOutage,
+  type DrugGroupResponse,
 } from "@/lib/rxnorm";
 import {
   listDuplicateFlagsForProfile,
@@ -208,11 +211,128 @@ async function handle(req:Request,ctx:Context){
     if(req.method==="DELETE"&&parts[0]==="upload"&&parts.length===2){
       const access=await authorizeUploadAccess(db(),principal,id(parts[1]));const uid=access.upload.id;const used=await db().prepare("SELECT id FROM medications WHERE owner_id=? AND source_ids LIKE ? LIMIT 1").bind(access.dataOwnerId,`%${uid}%`).first();const shared=await db().prepare("SELECT id FROM snapshots WHERE owner_id=? AND data LIKE ? LIMIT 1").bind(access.dataOwnerId,`%${uid}%`).first();if(used||shared)throw new ApiError(409,"This photo is part of a saved record.");await bucket().delete(access.upload.object_key);await db().prepare("DELETE FROM uploads WHERE id=? AND owner_id=?").bind(uid,access.dataOwnerId).run();return json({deleted:true});
     }
-    if(req.method==="POST"&&route==="parse") {const b=await body(req);const label=text(b.text,12000,true);return json(parseLabel(label));}
+    if(req.method==="POST"&&route==="parse"){
+      // Patient photo capture path: parse + context-aware identity resolve (fixtures, then optional live RxNorm).
+      const b=await body(req);const label=text(b.text,12000,true);
+      let priorMeds:PriorMedHint[]=[];
+      if(typeof b.profileId==="string"&&b.profileId){
+        try{
+          const access=await requireProfile(principal,b.profileId);
+          const rows=await db().prepare("SELECT data FROM medications WHERE owner_id=? AND profile_id=? AND list_state='active' LIMIT 40")
+            .bind(access.dataOwnerId,access.profile.id).all<{data:string}>();
+          priorMeds=rows.results.map(r=>{
+            const f=JSON.parse(r.data) as MedicationFields;
+            return {productName:f.productName,strength:f.strength,formulation:f.formulation,category:f.category,rxCui:f.rxCui,referenceName:f.referenceName};
+          });
+        }catch{/* prior list is optional ranking only */}
+      }
+      let liveDrugGroup:DrugGroupResponse|null=null;
+      const offline=resolveLabelDraft(label,{priorMeds,preferOffline:true});
+      const q=liveQueryFromDraft(offline.fields);
+      if(q&&(!offline.spellingCorrected||offline.ambiguous||!offline.terminology?.rxCui)){
+        try{
+          const qHash=hashQuery(q);
+          const cached=await db().prepare("SELECT response_json,expires_at FROM rxnorm_query_cache WHERE query_hash=?").bind(qHash).first<{response_json:string;expires_at:string}>();
+          if(cached&&cached.expires_at>new Date().toISOString()) liveDrugGroup=JSON.parse(cached.response_json) as DrugGroupResponse;
+          else{
+            const result=await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(q)}`,{signal:AbortSignal.timeout(8000),headers:{Accept:"application/json"}});
+            if(result.ok){
+              liveDrugGroup=await result.json() as DrugGroupResponse;
+              const now=new Date().toISOString();
+              await db().prepare("INSERT INTO rxnorm_query_cache (query_hash,query_text,response_json,fetched_at,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(query_hash) DO UPDATE SET response_json=excluded.response_json,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,query_text=excluded.query_text")
+                .bind(qHash,q,JSON.stringify(liveDrugGroup),now,new Date(Date.now()+6*60*60*1000).toISOString()).run();
+            }
+          }
+        }catch{/* offline resolve still returned */}
+      }
+      const resolved=resolveLabelDraft(label,{priorMeds,liveDrugGroup});
+      return json({
+        fields:resolved.fields,
+        notices:resolved.notices,
+        spellingCorrected:resolved.spellingCorrected,
+        ambiguous:resolved.ambiguous,
+        categoryNeedsAsk:resolved.categoryNeedsAsk,
+        reference:resolved.terminology?{rxCui:resolved.terminology.rxCui,referenceName:resolved.terminology.referenceName,mappingStatus:resolved.terminology.mappingStatus,matchMethod:resolved.terminology.matchMethod}:null,
+        note:"Proposed name and strength are a draft from the label. Confirm against the bottle. Reference ranks are not probabilities.",
+      });
+    }
+    if(req.method==="GET"&&route==="dsld/search"){
+      // Product terminology only — available to any signed-in principal with a profile context when provided.
+      const rawName=text(url.searchParams.get("q")||"",120,true);
+      const brand=text(url.searchParams.get("brand")||"",80);
+      const strength=text(url.searchParams.get("strength")||"",100);
+      let query="";
+      try{query=buildDsldProductQuery({productName:rawName,brandName:brand||undefined,strength:strength||undefined});}
+      catch(e){if(e instanceof DsldError)throw new ApiError(400,e.message);throw e;}
+      const result=await searchDsldProducts(query);
+      return json({...result,docs:DSLD_DOCS_URL,apiVersion:DSLD_API_VERSION});
+    }
+    if(req.method==="GET"&&route==="clinic/patients"){
+      await assertStaffToolsAllowed(db(),principal);
+      const practiceId=url.searchParams.get("practiceId")?id(url.searchParams.get("practiceId")):SYNTHETIC.practiceId;
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,principal).first();
+      if(!membership)throw new ApiError(403,"Staff access is required to list clinic patients.");
+      const rows=await db().prepare(
+        `SELECT p.id,p.legal_name,p.dob,p.postal_code,l.profile_id
+         FROM patients p
+         LEFT JOIN profile_patient_links l ON l.patient_id=p.id
+         WHERE p.practice_id=?
+         ORDER BY p.legal_name, p.dob
+         LIMIT 100`,
+      ).bind(practiceId).all<{id:string;legal_name:string;dob:string;postal_code:string|null;profile_id:string|null}>();
+      return json({
+        practiceId,
+        patients:rows.results.map(r=>({
+          id:r.id,
+          legalName:r.legal_name,
+          dob:r.dob,
+          postalCode:r.postal_code,
+          profileId:r.profile_id,
+        })),
+        note:"Select a patient with a linked medication list before importing. Name and DOB alone do not merge lists.",
+      });
+    }
+    if(req.method==="POST"&&route==="clinic/patients"){
+      await assertStaffToolsAllowed(db(),principal);
+      const b=await body(req);
+      const practiceId=typeof b.practiceId==="string"&&b.practiceId?id(b.practiceId):SYNTHETIC.practiceId;
+      const membership=await db().prepare("SELECT id FROM staff_memberships WHERE practice_id=? AND principal_id=? AND role='staff' LIMIT 1").bind(practiceId,principal).first();
+      if(!membership)throw new ApiError(403,"Staff access is required to create a clinic patient.");
+      let legalName="",dob="",postalCode:string|null=null;
+      try{
+        legalName=normalizeLegalName(b.legalName);
+        dob=parseDateOnly(b.dob);
+        postalCode=normalizePostalCode(b.postalCode??null);
+      }catch(e){
+        if(e instanceof ClinicIdentityError)throw new ApiError(400,e.message);
+        throw e;
+      }
+      // Never auto-merge on name/DOB — always create a distinct patient + linked profile when staff confirms create.
+      const patientId=crypto.randomUUID(),profileId=crypto.randomUUID(),linkId=crypto.randomUUID(),now=new Date().toISOString();
+      await db().batch([
+        db().prepare("INSERT INTO patients (id,practice_id,legal_name,dob,postal_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+          .bind(patientId,practiceId,legalName,dob,postalCode,now,now),
+        db().prepare("INSERT INTO profiles (id,owner_id,name,created_at) VALUES (?,?,?,?)")
+          .bind(profileId,principal,`${legalName} — medication list`,now),
+        db().prepare("INSERT INTO profile_patient_links (id,profile_id,patient_id,linked_by,created_at) VALUES (?,?,?,?,?)")
+          .bind(linkId,profileId,patientId,"staff_create",now),
+        event(principal,profileId,patientId,"patient_created"),
+      ]);
+      return json({
+        patient:{id:patientId,legalName,dob,postalCode,practiceId},
+        profile:{id:profileId,name:`${legalName} — medication list`,created_at:now},
+        note:"Created a new patient and linked medication list. Existing same-name patients were not merged.",
+      },201);
+    }
     if(req.method==="POST"&&route==="note-import"){
       await assertStaffToolsAllowed(db(),principal);
       const b=await body(req,128000),access=await requireProfile(principal,b.profileId),key=id(b.idempotencyKey);
       const owner=access.dataOwnerId,p=access.profile;
+      const link=await db().prepare("SELECT patient_id FROM profile_patient_links WHERE profile_id=?").bind(p.id).first<{patient_id:string}>();
+      if(!link)throw new ApiError(400,"Select or create a clinic patient with a linked medication list before importing. A display list name alone is not enough.");
+      if(typeof b.patientId==="string"&&b.patientId&&b.patientId!==link.patient_id){
+        throw new ApiError(400,"This import is for a different patient. Choose the patient again to restart.");
+      }
       const document=text(b.sourceDocument,120,true),sourceDate=text(b.sourceDate||"",10);
       if(b.reviewed!==true)throw new ApiError(400,"Review the selected medication lines before importing.");
       if(!Array.isArray(b.rows)||b.rows.length<1||b.rows.length>20)throw new ApiError(400,"Select between 1 and 20 reviewed medication lines.");

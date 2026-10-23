@@ -28,7 +28,7 @@ export default function PatientMedicationEditor(p:Props){
   }
   const evidence=<details className="patient-extra"><summary>{p.sourceIds.length?"See the label":"Label details"}</summary>
     {p.sourceIds.length>0&&<div className="source-images">{p.sourceIds.map(id=><a href={`/api/upload/${id}`} key={id} target="_blank" rel="noopener noreferrer"><img src={`/api/upload/${id}`} alt="Open medication label"/></a>)}</div>}
-    <label className="field">Type<select value={f.category} disabled={p.busy} onChange={e=>p.onField("category",e.target.value as MedicationFields["category"])}><option value="prescription">Prescription medicine</option><option value="otc">Over the counter</option><option value="supplement">Vitamin / supplement</option></select></label>
+    <label className="field">Type<select value={f.category} disabled={p.busy} onChange={e=>p.onField("category",e.target.value as MedicationFields["category"])}><option value="prescription">Prescription medicine</option><option value="otc">OTC medicine</option><option value="supplement">Vitamin / supplement</option></select></label>
     <label className="field">Directions on the label<textarea value={f.labelDirections} maxLength={1600} disabled={p.busy} rows={2} onChange={e=>p.onField("labelDirections",e.target.value)}/></label>
     <label className="field">How it is given<input value={f.route} maxLength={80} disabled={p.busy} placeholder="For example, by mouth" onChange={e=>p.onField("route",e.target.value)}/></label>
     {f.category==="supplement"&&<label className="field">Ingredients and serving size<textarea value={f.supplementFacts} maxLength={2500} rows={3} disabled={p.busy} onChange={e=>p.onField("supplementFacts",e.target.value)}/></label>}

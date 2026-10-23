@@ -11,7 +11,7 @@ Lisinopril 10 mg tablet; take 0.5 tablets by mouth once daily.
 Apixaban 5 mg tablet; take 1 tablet by mouth twice daily.
 Vitamin D3 1000 IU capsule; take 1 capsule daily.`;
 
-export default function NoteImportPanel({existing,ensureProfile,onSaved,onBusy}:{existing:Medication[];ensureProfile:()=>Promise<string>;onSaved:(profile:string)=>Promise<void>;onBusy:(busy:boolean)=>void}){
+export default function NoteImportPanel({existing,ensureProfile,onSaved,onBusy,patientId}:{existing:Medication[];ensureProfile:()=>Promise<string>;onSaved:(profile:string)=>Promise<void>;onBusy:(busy:boolean)=>void;patientId?:string}){
   const [step,setStep]=useState(1);
   const [raw,setRaw]=useState("");const [document,setDocument]=useState("Prior cardiology note");const [sourceDate,setSourceDate]=useState("");
   const [rows,setRows]=useState<NoteCandidate[]>([]);const [selected,setSelected]=useState<string[]>([]);const [reviewed,setReviewed]=useState(false);
@@ -29,7 +29,7 @@ export default function NoteImportPanel({existing,ensureProfile,onSaved,onBusy}:
   async function importRows(){
     if(!reviewed||!pending.length)return;working(true);setError("");
     try{const profileId=await ensureProfile();if(!requestKey.current)requestKey.current=crypto.randomUUID();
-      await api("note-import","POST",{profileId,sourceDocument:document,sourceDate,rows:pending.map(r=>r.fields),reviewed:true,idempotencyKey:requestKey.current});
+      await api("note-import","POST",{profileId,patientId:patientId||undefined,sourceDocument:document,sourceDate,rows:pending.map(r=>r.fields),reviewed:true,idempotencyKey:requestKey.current});
       await onSaved(profileId);
     }catch(e){setError((e as Error).message);}finally{working(false);}
   }
