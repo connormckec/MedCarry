@@ -7,12 +7,15 @@ import "./patient/patient.css";
 
 type ResumeDraft={id:string;medicationId:string|null;updatedAt:string;draft:{fields:Partial<MedicationFields>&{productName?:string};sourceIds:string[]}};
 type DuplicateFlag={id:string;medicationAId:string;medicationBId:string;flagType:string;explanation:string;status:string};
+type CleanupPair={medicationAId:string;medicationBId:string}|null;
 type ClinicReceipt={deliveryStatus:"pending"|"received";deliveryLabel:string;receivingClinic:string;emptyListAttested?:boolean}|null;
 type Props={
   medications:Medication[];loading:boolean;signIn:string;error:string;processing:boolean;
   clinicReceipt:ClinicReceipt;resumeDraft:ResumeDraft|null;duplicateFlags?:DuplicateFlag[];duplicatePrompt?:string;
+  cleanupPair?:CleanupPair;
   onDuplicateRespond?:(id:string,response:"take_both"|"added_twice"|"unsure")=>void;
-  onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication)=>void;onResumeDraft:(d:ResumeDraft)=>void;
+  onCleanupDismiss?:()=>void;
+  onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication,opts?:{cleanup?:boolean})=>void;onResumeDraft:(d:ResumeDraft)=>void;
   onSendToClinic:(opts:{emptyListAttested:boolean})=>void;onViewReceipt:()=>void;onChangeList:()=>void;
 };
 export default function GuidedPatientHome(p:Props){
@@ -24,6 +27,27 @@ export default function GuidedPatientHome(p:Props){
   useEffect(()=>{setAdding(false);},[p.medications]);
   const capture=!finished&&(!p.medications.length||adding);
   function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` ${m.strength}`:""}`:"Medication";}
+  function medById(id:string){return p.medications.find(x=>x.id===id);}
+  const listSection=p.medications.length>0&&!capture&&<section className="patient-med-list" aria-label="Your medications">
+    <h2>Your medications ({p.medications.length})</h2>
+    <p className="patient-small">Tap Edit to change details, or clean up a mistake.</p>
+    {p.medications.map(m=>{
+      const similar=openDupes.find(f=>f.medicationAId===m.id||f.medicationBId===m.id);
+      const otherId=similar?(similar.medicationAId===m.id?similar.medicationBId:similar.medicationAId):"";
+      return <div className="patient-med-row" key={m.id}>
+        <button type="button" className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}>
+          <span className="patient-med-icon"><Pill size={24}/></span>
+          <span>
+            <strong>{m.productName||"Medication to finish"}</strong>
+            <span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span>
+            <b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":m.status==="stopped"?"Checked · no longer take":"Checked"):"Needs checking"}</b>
+            {similar&&<em className="patient-similar">Looks similar to {medLabel(otherId)}</em>}
+          </span>
+          <span className="patient-med-edit">Edit<ChevronRight size={21}/></span>
+        </button>
+      </div>;
+    })}
+  </section>;
   return <main className="patient-home">
     <header className="patient-brand"><span className="brand-icon"><WalletCards size={22}/></span><strong>MedCarry</strong><ShieldCheck size={22}/></header>
     <div className="patient-testing">Test version · Demo records only</div>
@@ -40,8 +64,16 @@ export default function GuidedPatientHome(p:Props){
       </>
       :<>
         {!capture&&p.resumeDraft&&<button className="patient-secondary" disabled={p.processing} onClick={()=>p.onResumeDraft(p.resumeDraft!)}>Continue unfinished medication{p.resumeDraft.draft.fields.productName?`: ${p.resumeDraft.draft.fields.productName}`:""}<ChevronRight size={21}/></button>}
+        {!capture&&p.cleanupPair&&medById(p.cleanupPair.medicationAId)&&medById(p.cleanupPair.medicationBId)&&<div className="patient-cleanup" role="status">
+          <h2>Clean up a duplicate</h2>
+          <p>Both stay on your list until you choose. Open the one added by mistake, then choose <strong>I added this by mistake</strong>.</p>
+          <button className="patient-secondary" disabled={p.processing} onClick={()=>p.onReview(medById(p.cleanupPair!.medicationAId)!,{cleanup:true})}>Open {medLabel(p.cleanupPair.medicationAId)}<ChevronRight size={21}/></button>
+          <button className="patient-secondary" disabled={p.processing} onClick={()=>p.onReview(medById(p.cleanupPair!.medicationBId)!,{cleanup:true})}>Open {medLabel(p.cleanupPair.medicationBId)}<ChevronRight size={21}/></button>
+          <p className="patient-small">If you take both, leave them. If you stopped one, open it and choose “I no longer take this” — that does not cancel a prescription.</p>
+          {p.onCleanupDismiss&&<button className="patient-text" disabled={p.processing} onClick={p.onCleanupDismiss}>I'll fix this later</button>}
+        </div>}
         {!capture&&openDupes.length>0&&p.onDuplicateRespond&&<div className="patient-duplicate" role="status">
-          <h2>{p.duplicatePrompt||"This may already be on your list."}</h2>
+          <h2>{p.duplicatePrompt||"Looks similar to another medicine on your list."}</h2>
           {openDupes.slice(0,3).map(flag=><div className="patient-duplicate-card" key={flag.id}>
             <p><strong>{medLabel(flag.medicationAId)}</strong> and <strong>{medLabel(flag.medicationBId)}</strong></p>
             <p className="patient-small">{flag.explanation}</p>
@@ -50,11 +82,11 @@ export default function GuidedPatientHome(p:Props){
               <button className="patient-secondary" disabled={p.processing} onClick={()=>p.onDuplicateRespond!(flag.id,"added_twice")}>I added one twice</button>
               <button className="patient-text" disabled={p.processing} onClick={()=>p.onDuplicateRespond!(flag.id,"unsure")}>I'm not sure</button>
             </div>
-            <p className="patient-small">Nothing is removed automatically. Both stay on your list until you choose a change.</p>
+            <p className="patient-small">Nothing is removed automatically. You choose keep, mistake, or no longer take.</p>
           </div>)}
         </div>}
         <h1>{capture?"Add a medication.":pending.length?"Check your medicines.":"Send to the clinic portal."}</h1>
-        <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time.":"Send your confirmed list through the secure clinic portal — not by text, email, or phone share sheet."}</p>
+        <p className="patient-intro">{capture?"Photograph the name and directions.":pending.length?"Check one medicine at a time. Edit any entry below to fix mistakes.":"Send your confirmed list through the secure clinic portal — not by text, email, or phone share sheet."}</p>
         {capture?<div className="patient-capture">
           <button className="patient-primary" disabled={p.processing} onClick={p.onCamera}><Camera size={24}/>Take a picture</button>
           <details className="patient-alternatives"><summary>Other ways to add it</summary><button className="patient-secondary" disabled={p.processing} onClick={p.onUpload}><Upload size={21}/>Choose a picture</button><button className="patient-secondary" disabled={p.processing} onClick={p.onManual}>Type it in</button></details>
@@ -64,8 +96,9 @@ export default function GuidedPatientHome(p:Props){
           {pending.length>0?<><div className="patient-count">{p.medications.length-pending.length} of {p.medications.length} checked</div><button className="patient-primary" disabled={p.processing} onClick={()=>p.onReview(pending[0])}>Check next medication<ChevronRight size={22}/></button></>
           :<button className="patient-primary" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:false})}><Check size={23}/>{PATIENT_SEND_CTA}</button>}
           <button className="patient-secondary" disabled={p.processing} onClick={()=>setAdding(true)}><Camera size={22}/>Add another medication</button>
+          {listSection}
         </>}
-        {p.medications.length>0&&<details className="patient-list"><summary>View my medications ({p.medications.length})</summary>{p.medications.map(m=><button key={m.id} className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}><span className="patient-med-icon"><Pill size={24}/></span><span><strong>{m.productName||"Medication to finish"}</strong><span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span><b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":"Checked"):"Needs checking"}</b></span><ChevronRight size={21}/></button>)}</details>}
+        {capture&&p.medications.length>0&&<details className="patient-list"><summary>View my medications ({p.medications.length})</summary>{p.medications.map(m=><button key={m.id} className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}><span className="patient-med-icon"><Pill size={24}/></span><span><strong>{m.productName||"Medication to finish"}</strong><span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span><b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":"Checked"):"Needs checking"}</b></span><ChevronRight size={21}/></button>)}</details>}
       </>}
       {p.error&&<div className="patient-error" role="alert">{p.error}</div>}
     </section>

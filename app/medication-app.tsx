@@ -16,7 +16,8 @@ import StaffHome from "./staff-home";
 
 type CardSummary = {id:string;recipient:string;patient_name:string;created_at:string};
 type EditorDraft = {id:string;medicationId:string|null;updatedAt:string;draft:{fields:MedicationFields;sourceIds:string[];step?:number}};
-type Editor = {fields:MedicationFields;sourceIds:string[];id?:string;revision?:number;notices:string[];newSources:string[];quick?:boolean;advanced?:boolean;adherenceTouched?:boolean};
+type Editor = {fields:MedicationFields;sourceIds:string[];id?:string;revision?:number;notices:string[];newSources:string[];quick?:boolean;advanced?:boolean;adherenceTouched?:boolean;cleanupFocus?:boolean};
+type CleanupPair = {medicationAId:string;medicationBId:string}|null;
 type UndoHint = {medicationId:string;revision:number;changeEventId:string;label:string};
 type DuplicateFlag = {id:string;medicationAId:string;medicationBId:string;flagType:string;explanation:string;status:string;evidence:Record<string,unknown>};
 type InboxRow = {
@@ -52,7 +53,8 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   const [openDrafts,setOpenDrafts]=useState<EditorDraft[]>([]),[saveState,setSaveState]=useState<""|"saving"|"saved"|"error">("");
   const [undoHint,setUndoHint]=useState<UndoHint|null>(null);
   const [duplicateFlags,setDuplicateFlags]=useState<DuplicateFlag[]>([]);
-  const [duplicatePrompt,setDuplicatePrompt]=useState("This may already be on your list.");
+  const [duplicatePrompt,setDuplicatePrompt]=useState("Looks similar to another medicine on your list.");
+  const [cleanupPair,setCleanupPair]=useState<CleanupPair>(null);
   const [inboxDate,setInboxDate]=useState("2026-11-03"),[inboxRows,setInboxRows]=useState<InboxRow[]>([]),[inboxBusy,setInboxBusy]=useState(false),[reviewDetail,setReviewDetail]=useState<ReviewDetail|null>(null);
   const labelTarget=useRef<Editor|null>(null);
   const uploadRef=useRef<HTMLInputElement>(null),captureRef=useRef<HTMLInputElement>(null),videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),ocrAbort=useRef<AbortController|null>(null),listRequest=useRef(0),cardRequest=useRef(""),submitRequest=useRef(""),cameraSession=useRef(0),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),editorRef=useRef<Editor|null>(null);
@@ -61,6 +63,12 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   useEffect(()=>{void bootstrap();return()=>{streamRef.current?.getTracks().forEach(t=>t.stop());ocrAbort.current?.abort();if(draftTimer.current)clearTimeout(draftTimer.current);};},[]);
   useEffect(()=>{if(toast){const timer=setTimeout(()=>setToast(""),4500);return()=>clearTimeout(timer);}},[toast]);
   useEffect(()=>{if(undoHint){const timer=setTimeout(()=>setUndoHint(null),12000);return()=>clearTimeout(timer);}},[undoHint]);
+  useEffect(()=>{
+    if(!cleanupPair)return;
+    const a=meds.some(m=>m.id===cleanupPair.medicationAId);
+    const b=meds.some(m=>m.id===cleanupPair.medicationBId);
+    if(!a||!b)setCleanupPair(null);
+  },[meds,cleanupPair]);
   useEffect(()=>{
     if(!editor||!profileId||busy)return;
     if(draftTimer.current)clearTimeout(draftTimer.current);
@@ -72,16 +80,23 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   async function respondDuplicate(flagId:string,response:"take_both"|"added_twice"|"unsure"|"staff_dismissed"){
     setBusy(true);setError("");
     try{
-      await api(`duplicate-flag/${flagId}/respond`,"POST",{response});
+      const flag=duplicateFlags.find(f=>f.id===flagId);
+      const r=await api<{note?:string}>(`duplicate-flag/${flagId}/respond`,"POST",{response});
       await loadList(profileId);
-      setToast(response==="take_both"?"Saved: you take both.":response==="added_twice"?"Saved: one may have been added twice. Both stay visible.":response==="staff_dismissed"?"Flag dismissed for staff.":"Saved: not sure. Clinic can still review.");
+      if(response==="added_twice"&&flag){
+        setCleanupPair({medicationAId:flag.medicationAId,medicationBId:flag.medicationBId});
+        setToast("Both stay on your list. Open the extra one and choose “I added this by mistake.”");
+      }else{
+        if(response!=="added_twice")setCleanupPair(null);
+        setToast(response==="take_both"?"Saved: you take both.":response==="staff_dismissed"?"Flag dismissed for staff.":r.note||"Saved: not sure. Clinic can still review.");
+      }
     }catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
   async function switchProfile(pid:string){setProfileId(pid);setMeds([]);setCards([]);setOpenDrafts([]);setLoading(true);setError("");try{await loadList(pid);}catch(e){setError((e as Error).message);}finally{setLoading(false);}}
   async function ensureProfile(){if(profileId)return profileId;const r=await api<{profile:Profile}>("profile","POST",{name:"My medication list"});setProfiles(p=>[...p,r.profile]);setProfileId(r.profile.id);return r.profile.id;}
   async function makeProfile(){setBusy(true);setFormError("");try{const r=await api<{profile:Profile}>("profile","POST",{name:newProfileName});setProfiles(p=>[...p,r.profile]);setProfileId(r.profile.id);setMeds([]);setCards([]);setOpenDrafts([]);setCreatingProfile(false);setNewProfileName("");}catch(e){setFormError((e as Error).message);}finally{setBusy(false);}}
   function openManual(){setClinicReceipt(null);setFormError("");setMatches([]);setSearchMessage("");setSaveState("");setEditor({fields:{...emptyMedication(),formulation:"other",doseUnit:"other"},sourceIds:[],notices:[],newSources:[]});}
-  function openEditor(m:Medication){setClinicReceipt(null);setFormError("");setMatches([]);setSearchMessage("");setSaveState("");const fields=guided&&m.source==="note"&&!isConfirmed(m)?historicalUseProposal(m):{...m};setEditor({fields,sourceIds:m.sourceIds,id:m.id,revision:m.revision,notices:[],newSources:[],quick:quickReview(fields)});}
+  function openEditor(m:Medication,opts?:{cleanup?:boolean}){setClinicReceipt(null);setFormError("");setMatches([]);setSearchMessage("");setSaveState("");const fields=guided&&m.source==="note"&&!isConfirmed(m)?historicalUseProposal(m):{...m};setEditor({fields,sourceIds:m.sourceIds,id:m.id,revision:m.revision,notices:[],newSources:[],quick:opts?.cleanup?false:quickReview(fields),cleanupFocus:!!opts?.cleanup});}
   function resumeDraft(d:{id:string;medicationId:string|null;updatedAt:string;draft:{fields:Partial<MedicationFields>;sourceIds:string[]}}){setClinicReceipt(null);setFormError("");setMatches([]);setSearchMessage("");setSaveState("saved");const med=d.medicationId?meds.find(m=>m.id===d.medicationId):undefined;setEditor({fields:{...emptyMedication(),...d.draft.fields},sourceIds:d.draft.sourceIds||[],id:med?.id,revision:med?.revision,notices:[],newSources:[],quick:false});}
   function field<K extends keyof MedicationFields>(key:K,value:MedicationFields[K]){setEditor(e=>e?{...e,...(key==="adherence"?{adherenceTouched:true}:{}),fields:{...e.fields,[key]:value,...(["productName","strength","strengthUnknown","route"].includes(key)?{rxCui:"",referenceName:""}:{}),...(key==="strength"&&String(value).trim()?{strengthUnknown:false}:{})}}:e);setFormError("");setSaveState("");}
   function changeForm(value:MedicationFields["formulation"]){const map:Record<string,MedicationFields["doseUnit"]>={tablet:"tablets",capsule:"capsules",liquid:"mL",inhaler:"puffs",injection:"units",topical:"applications",patch:"patches",drops:"drops",powder:"scoops",other:"other"};setEditor(e=>e?{...e,fields:{...e.fields,formulation:value,doseUnit:map[value],rxCui:"",referenceName:""}}:e);setSaveState("");}
@@ -114,6 +129,7 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
       await loadList(profileId);
       setEditor(null);
       if(reason==="added_by_mistake"){
+        setCleanupPair(null);
         setUndoHint({medicationId:editor.id,revision:r.revision||((editor.revision||1)+1),changeEventId:r.changeEventId,label:"Removed as added by mistake."});
         setToast("Removed from your list. Undo is available.");
       }else{
@@ -205,13 +221,13 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
     }catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
   return <div className={guided?"guided-session":"staff-session"}>
-    {guided?<GuidedPatientHome medications={meds} loading={loading} signIn={signIn} error={error} processing={processing||busy} clinicReceipt={clinicReceipt} resumeDraft={openDrafts[0]||null} duplicateFlags={duplicateFlags.filter(f=>f.status==="open")} duplicatePrompt={duplicatePrompt} onDuplicateRespond={(id,response)=>void respondDuplicate(id,response)} onCamera={()=>void startCamera()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onResumeDraft={d=>resumeDraft(d)} onSendToClinic={opts=>void sendToClinic(opts)} onViewReceipt={()=>{if(clinicReceipt?.payload)setCard({id:clinicReceipt.id,recipient:clinicReceipt.receivingClinic,patientName:(clinicReceipt.payload as {identity?:{patient?:{legalName?:string}}}).identity?.patient?.legalName||selected?.name||"Patient",createdAt:new Date().toISOString(),medications:clinicReceipt.payload.medications||[]});}} onChangeList={()=>{setClinicReceipt(null);submitRequest.current="";}}/>
+    {guided?<GuidedPatientHome medications={meds} loading={loading} signIn={signIn} error={error} processing={processing||busy} clinicReceipt={clinicReceipt} resumeDraft={openDrafts[0]||null} duplicateFlags={duplicateFlags.filter(f=>f.status==="open")} duplicatePrompt={duplicatePrompt} cleanupPair={cleanupPair} onDuplicateRespond={(id,response)=>void respondDuplicate(id,response)} onCleanupDismiss={()=>setCleanupPair(null)} onCamera={()=>void startCamera()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onResumeDraft={d=>resumeDraft(d)} onSendToClinic={opts=>void sendToClinic(opts)} onViewReceipt={()=>{if(clinicReceipt?.payload)setCard({id:clinicReceipt.id,recipient:clinicReceipt.receivingClinic,patientName:(clinicReceipt.payload as {identity?:{patient?:{legalName?:string}}}).identity?.patient?.legalName||selected?.name||"Patient",createdAt:new Date().toISOString(),medications:clinicReceipt.payload.medications||[]});}} onChangeList={()=>{setClinicReceipt(null);submitRequest.current="";}}/>
     :<StaffHome profiles={profiles} profileId={profileId} medications={meds} cards={cards} loading={loading} signIn={signIn} error={error} busy={busy} processing={processing} identityHeader={identityHeader} identityBusy={identityBusy} duplicateFlags={duplicateFlags} inboxDate={inboxDate} inboxRows={inboxRows} inboxBusy={inboxBusy} onDuplicateDismiss={id=>void respondDuplicate(id,"staff_dismissed")} onProfile={pid=>void switchProfile(pid)} onNewProfile={()=>{setCreatingProfile(true);setFormError("");}} onImport={()=>setNoteImport(true)} onCamera={()=>void startCamera()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onCreateCard={finishList} onOpenCard={cid=>void openCard(cid)} onDemo={()=>void demo()} onLoadSyntheticHeader={()=>void loadSyntheticHeader()} onShowHelperHeader={()=>void loadSyntheticHeader(SYNTHETIC.respondentHelper.id)} onLoadInbox={()=>void loadInbox()} onInboxDate={d=>{setInboxDate(d);void loadInbox(d);}} onReviewSubmission={id=>void openReview(id)}/>}
     <input ref={uploadRef} type="file" accept="image/*" multiple hidden onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";const target=labelTarget.current;labelTarget.current=null;void processFiles(files,target||undefined);}}/>
     <input ref={captureRef} type="file" accept="image/*" capture="environment" hidden onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";const target=labelTarget.current;labelTarget.current=null;closeCamera();void processFiles(files,target||undefined);}}/>
     {processing&&<Modal title="Reading your label" onClose={()=>{}} locked><div className="processing-content"><div className="scanner-symbol"><ScanLine size={37}/></div><h3 aria-live="polite">{processMessage}</h3><p>Keep this page open. Check the details next.</p><button className="button secondary" onClick={()=>ocrAbort.current?.abort()} disabled={!ocrAbort.current}>Type it in instead</button></div></Modal>}
     {camera&&<Modal title="Take a picture" onClose={closeCamera}><div className="camera-content"><p>Show the name and directions on one bottle.</p><div className="camera-view"><video ref={videoRef} playsInline muted onLoadedMetadata={()=>setCameraReady(true)}/>{!cameraReady&&!cameraError&&<span><LoaderCircle className="spin"/>Opening camera…</span>}</div>{cameraError&&<div className="alert error" role="alert">{cameraError}</div>}<div className="dialog-actions">{!cameraError&&<button className="button primary" disabled={!cameraReady} onClick={()=>void snap()}><Camera size={21}/>Take picture</button>}<button className={`button ${cameraError?"primary":"secondary"}`} onClick={()=>captureRef.current?.click()}><Upload size={20}/>Choose a picture</button>{cameraError&&<button className="patient-text" onClick={()=>{const target=labelTarget.current;labelTarget.current=null;closeCamera();if(target)setEditor({...target,quick:false});else openManual();}}>Type it in instead</button>}</div></div></Modal>}
-    {editor&&!camera&&!processing&&<Modal title={editor.advanced?"Medication details":editor.id?"Check this medication":"Add a medication"} onClose={()=>void closeEditor()} wide={!!editor.advanced} locked={busy}>{guided||!editor.advanced?<div className="guided-session"><PatientMedicationEditor key={`${editor.id||"new"}:${editor.sourceIds.join(",")}`} fields={editor.fields} sourceIds={editor.sourceIds} notices={editor.notices} existing={!!editor.id} quick={!!editor.quick} busy={busy} error={formError} saveState={saveState} onField={field} onForm={changeForm} onSave={confirm=>void save(confirm)} onNoLongerTake={()=>void reportChange("no_longer_take")} onAddedByMistake={()=>void reportChange("added_by_mistake")} onCamera={()=>void startCamera(editor)} onAdvanced={guided?undefined:()=>setEditor(e=>e?{...e,advanced:true,quick:false}:e)}/></div>:<><div className="editor-content">
+    {editor&&!camera&&!processing&&<Modal title={editor.advanced?"Medication details":editor.cleanupFocus?"Clean up this medication":editor.id?"Check this medication":"Add a medication"} onClose={()=>void closeEditor()} wide={!!editor.advanced} locked={busy}>{guided||!editor.advanced?<div className="guided-session"><PatientMedicationEditor key={`${editor.id||"new"}:${editor.sourceIds.join(",")}:${editor.cleanupFocus?"cleanup":"edit"}`} fields={editor.fields} sourceIds={editor.sourceIds} notices={editor.notices} existing={!!editor.id} quick={!!editor.quick} cleanupFocus={!!editor.cleanupFocus} busy={busy} error={formError} saveState={saveState} onField={field} onForm={changeForm} onSave={confirm=>void save(confirm)} onNoLongerTake={()=>void reportChange("no_longer_take")} onAddedByMistake={()=>void reportChange("added_by_mistake")} onCamera={()=>void startCamera(editor)} onAdvanced={guided?undefined:()=>setEditor(e=>e?{...e,advanced:true,quick:false}:e)}/></div>:<><div className="editor-content">
       <div className="source-strip">{editor.sourceIds.length?<><div className="source-images">{editor.sourceIds.map(uid=><a key={uid} href={`/api/upload/${uid}`} target="_blank" rel="noopener noreferrer"><img src={`/api/upload/${uid}`} alt="Open the original medication label"/></a>)}</div><div><strong>Your source label</strong><p>Tap a photo to compare the original.</p></div></>:<><span className="section-icon"><FileText size={21}/></span><div><strong>{editor.fields.source==="note"?"Imported historical entry":"Manual entry"}</strong><p>Use the product label and your current routine.</p></div></>}</div>
       {editor.id&&editor.sourceIds.length<4&&<button className="button secondary full" disabled={busy} onClick={()=>void startCamera(editor)}><Camera size={19}/>Add a photo of this medicine</button>}
       {editor.fields.sourceDocument&&<div className="historical-source"><strong>Older record: {editor.fields.sourceDocument||"Imported note"} · {editor.fields.sourceDate||"date unknown"}</strong><p>{editor.fields.sourceText}</p><small>This is historical information. Check the medicine and report how you take it now.</small></div>}

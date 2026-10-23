@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyMedication, quantity, validateFields, parseLabel, reportedAmount, isConfirmed, canCreateCard, useSummary, snapshotText } from '../lib/medication.ts';
+import { emptyMedication, quantity, validateFields, parseLabel, proposeUseFromDirections, isLabelUseDraft, reportedAmount, isConfirmed, canCreateCard, useSummary, snapshotText } from '../lib/medication.ts';
 const valid=()=>({...emptyMedication(),productName:'Example tablet',strength:'25 mg',actualDose:'1',frequency:'daily'});
 for(const [input,expected] of [['1/2',.5],['½',.5],['1 1/2',1.5],['1½',1.5],['¼',.25],['.5',.5],['2',2],['0',null],['1/0',null],['-1',null],['NaN',null],['1e3',null],['20001',null],['50000/1',null]]) test(`quantity ${input}`,()=>assert.equal(quantity(input),expected));
 test('half a tablet preserves product strength and derives reported amount',()=>{const m={...valid(),actualDose:'1/2'};assert.equal(reportedAmount(m),'12.5 mg per reported dose');assert.equal(m.strength,'25 mg');});
@@ -16,7 +16,20 @@ test('variable schedules require the full description',()=>{assert.throws(()=>va
 test('held and stopped entries do not need a current amount',()=>{for(const status of ['held','stopped'])assert.doesNotThrow(()=>validateFields({...valid(),status,actualDose:'',frequency:'unknown'},true));});
 test('input enums, numeric quantities, strings, and booleans are validated',()=>{assert.throws(()=>validateFields({...valid(),category:'unsafe'}));assert.throws(()=>validateFields({...valid(),actualDose:'-2'}));assert.throws(()=>validateFields({...valid(),strength:25}));assert.throws(()=>validateFields({...valid(),strengthUnknown:'true'}));assert.throws(()=>validateFields({...valid(),rxCui:'not-an-id'}));});
 test('a stale confirmation cannot authorize a card',()=>{assert.equal(isConfirmed({revision:2,confirmedRevision:1,confirmedAt:'2026-01-01'}),false);assert.equal(canCreateCard([]),false);assert.equal(canCreateCard([{revision:2,confirmedRevision:1,confirmedAt:'2026-01-01'}]),false);assert.equal(canCreateCard([{revision:2,confirmedRevision:2,confirmedAt:'2026-01-01'}]),true);});
-test('readable label directions propose a reviewable draft',()=>{const r=parseLabel('DEMO PHARMACY\nMETOPROLOL TARTRATE 25 MG TABLETS\nTake 1 tablet by mouth twice daily.\nWith meals.');assert.equal(r.fields.productName,'METOPROLOL TARTRATE');assert.equal(r.fields.strength,'25 MG');assert.equal(r.fields.actualDose,'1');assert.equal(r.fields.frequency,'twice');assert.equal(r.fields.route,'By mouth');assert.match(r.fields.labelDirections,/With meals/);});
+test('readable label directions propose a reviewable draft',()=>{const r=parseLabel('DEMO PHARMACY\nMETOPROLOL TARTRATE 25 MG TABLETS\nTake 1 tablet by mouth twice daily.\nWith meals.');assert.equal(r.fields.productName,'METOPROLOL TARTRATE');assert.equal(r.fields.strength,'25 MG');assert.equal(r.fields.actualDose,'1');assert.equal(r.fields.frequency,'twice');assert.equal(r.fields.route,'By mouth');assert.match(r.fields.labelDirections,/With meals/);assert.ok(r.notices.some(n=>/starting draft|take this differently/i.test(n)));assert.equal(isLabelUseDraft(r.fields),true);});
+test('proposeUseFromDirections prefills frequency without confirming use',()=>{
+  const p=proposeUseFromDirections('Take 1 tablet by mouth twice daily with meals.');
+  assert.equal(p.frequency,'twice');assert.equal(p.actualDose,'1');assert.match(p.timing,/with meals/i);assert.equal(p.suggested,true);
+  assert.ok(p.notices.some(n=>/draft|differently/i.test(n)));
+  assert.equal(proposeUseFromDirections('').frequency,'unknown');
+  assert.equal(proposeUseFromDirections('').suggested,false);
+});
+test('label use draft stays distinct from confirmed patient use',()=>{
+  assert.equal(isLabelUseDraft({labelDirections:'Take 1 daily',frequency:'daily',source:'photo'}),true);
+  assert.equal(isLabelUseDraft({labelDirections:'Take 1 daily',frequency:'unknown',source:'photo'}),false);
+  assert.equal(isLabelUseDraft({labelDirections:'',frequency:'daily',source:'photo'}),false);
+  assert.equal(isLabelUseDraft({labelDirections:'Take 1 daily',frequency:'daily',source:'manual'}),false);
+});
 test('half-tablet label directions retain the fraction',()=>{const r=parseLabel('EXAMPLE MEDICATION 25 MG TABLETS\nTake one-half tablet by mouth once daily.');assert.equal(r.fields.actualDose,'0.5');});
 test('a taper cannot be flattened into a simple daily dose',()=>{const r=parseLabel('EXAMPLE MEDICATION 5 MG TABLETS\nTake 2 tablets daily for 3 days then 1 tablet daily.');assert.equal(r.fields.frequency,'custom');assert.equal(r.fields.actualDose,'');assert.match(r.fields.actualInstructions,/then/);});
 test('PRN intervals and limits stay in label instructions without falsely duplicating actual use',()=>{const r=parseLabel('EXAMPLE MEDICATION 10 MG TABLETS\nTake 1 tablet every 6 hours as needed.\nDo not exceed 4 tablets per day.');assert.equal(r.fields.frequency,'prn');assert.match(r.fields.labelDirections,/every 6 hours/);assert.match(r.fields.labelDirections,/Do not exceed/);assert.equal(r.fields.actualInstructions,'');});

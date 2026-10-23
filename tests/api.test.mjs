@@ -283,10 +283,32 @@ test('RxNorm normalize flags brand/generic duplicates without merging',async()=>
   assert.ok(dup);
   assert.match(dup.explanation,/Brand and generic|clinical product/i);
   assert.equal(list.data.medications.length,2);
+  assert.match(list.data.duplicatePrompt||'',/Looks similar|already be on your list/i);
   const responded=await f.request('duplicate-flag/'+dup.id+'/respond','POST',{response:'take_both'});
   assert.equal(responded.status,200);
   assert.equal(responded.data.flag.status,'take_both');
   assert.equal((await f.request('list?profile='+p)).data.medications.length,2);
+  f.sqlite.close();
+});
+test('added_twice records answer without merge; patient then suppresses the mistake',async()=>{
+  const f=fixture(),p=await setup(f);
+  const a=await add(f,p,{...valid(),productName:'Eliquis',strength:'5 mg',actualDose:'1',frequency:'twice'});
+  const b=await add(f,p,{...valid(),productName:'apixaban',strength:'5 mg',actualDose:'1',frequency:'twice'});
+  const list=await f.request('list?profile='+p);
+  const dup=list.data.duplicateFlags.find(d=>d.flagType==='possible_duplicate'&&d.status==='open');
+  assert.ok(dup);
+  const responded=await f.request('duplicate-flag/'+dup.id+'/respond','POST',{response:'added_twice'});
+  assert.equal(responded.status,200);
+  assert.equal(responded.data.flag.status,'added_twice');
+  assert.match(responded.data.note||'',/by mistake|Both entries stay/i);
+  assert.equal((await f.request('list?profile='+p)).data.medications.length,2);
+  const suppressed=await f.request('medication/'+b.id+'/change','POST',{revision:1,reason:'added_by_mistake'});
+  assert.equal(suppressed.status,200);
+  assert.equal(suppressed.data.suppressed,true);
+  const after=await f.request('list?profile='+p);
+  assert.equal(after.data.medications.length,1);
+  assert.equal(after.data.medications[0].id,a.id);
+  assert.equal(after.data.changeEvents[0].reason,'added_by_mistake');
   f.sqlite.close();
 });
 test('distinct strength and release cases do not propose possible_duplicate',async()=>{
