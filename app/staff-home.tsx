@@ -1,26 +1,30 @@
 "use client";
-import { useState } from "react";
-import { ArrowUpRight, Camera, Check, ChevronRight, FileText, LoaderCircle, Plus, Upload, WalletCards } from "lucide-react";
-import { isConfirmed, canCreateCard, type Medication, type Profile } from "@/lib/medication";
-import type { StaffIdentityHeader } from "@/lib/clinic-identity";
+import { useEffect, useState } from "react";
+import { ArrowUpRight, ChevronRight, FileText, LoaderCircle, WalletCards } from "lucide-react";
+import { isConfirmed, type Medication, type Profile } from "@/lib/medication";
 import { STAFF_INBOX_INTRO } from "@/lib/clinic-submission";
+import { SYNTHETIC } from "@/lib/synthetic-clinic";
+import { api } from "@/lib/client-api";
+import NoteImportPanel from "./note-import-panel";
 import "./staff.css";
 
-type CardSummary={id:string;recipient:string;patient_name:string;created_at:string};
-type DuplicateFlag={id:string;medicationAId:string;medicationBId:string;flagType:string;explanation:string;status:string};
 type InboxRow={
   appointmentId:string;patientLegalName:string;patientDob:string;startsAt:string;timezone:string;providerName:string;serviceName:string;
   queue:{submissionStatus:string;changeCounts:{added:number;stopped:number;changed:number;duplicate:number;uncertain:number}};
   detail:{patientPostalCode:string|null;respondentId:string|null;aprimaStatus:string};
   submission:{id:string}|null;
 };
+type ClinicPatient={id:string;legalName:string;dob:string;postalCode:string|null;profileId:string|null};
 type Props={
-  profiles:Profile[];profileId:string;medications:Medication[];cards:CardSummary[];loading:boolean;signIn:string;error:string;busy:boolean;processing:boolean;
-  identityHeader:StaffIdentityHeader|null;identityBusy:boolean;duplicateFlags?:DuplicateFlag[];
+  profiles:Profile[];profileId:string;medications:Medication[];loading:boolean;signIn:string;error:string;busy:boolean;processing:boolean;
+  identityBusy:boolean;
   inboxDate:string;inboxRows:InboxRow[];inboxBusy:boolean;
-  onDuplicateDismiss?:(id:string)=>void;onProfile:(id:string)=>void;onNewProfile:()=>void;onImport:()=>void;onCamera:()=>void;onUpload:()=>void;onManual:()=>void;
-  onReview:(medication:Medication)=>void;onCreateCard:()=>void;onOpenCard:(id:string)=>void;onDemo:()=>void;onLoadSyntheticHeader:()=>void;onShowHelperHeader:()=>void;
+  onProfile:(id:string)=>void;onManual:()=>void;onReview:(medication:Medication)=>void;
   onLoadInbox:()=>void;onInboxDate:(date:string)=>void;onReviewSubmission:(submissionId:string)=>void;
+  onDemo:()=>void;onSeedClinic:()=>void;
+  ensureProfile:()=>Promise<string>;
+  onImportSaved:(profileId:string)=>Promise<void>;
+  onBusy:(busy:boolean)=>void;
 };
 function formatDob(dob:string){const [y,m,d]=dob.split("-").map(Number);if(!y||!m||!d)return dob;return new Date(Date.UTC(y,m-1,d)).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});}
 function formatAppointment(startsAt:string,timezone:string){try{return new Intl.DateTimeFormat(undefined,{dateStyle:"medium",timeStyle:"short",timeZone:timezone}).format(new Date(startsAt));}catch{return startsAt;}}
@@ -31,30 +35,78 @@ function statusLabel(status:string){
   return "Not started";
 }
 export default function StaffHome(p:Props){
-  const [adding,setAdding]=useState(false),[history,setHistory]=useState(false),[expanded,setExpanded]=useState<string|null>(null),[mode,setMode]=useState<"inbox"|"lists">("inbox");
-  const pending=p.medications.filter(m=>!isConfirmed(m)).length;
-  const header=p.identityHeader;
-  const flags=(p.duplicateFlags||[]).filter(f=>f.status==="open"||f.status==="unsure");
-  function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` · ${m.strength}`:""}`:id.slice(0,8);}
+  const [mode,setMode]=useState<"import"|"inbox">("import");
+  const [patients,setPatients]=useState<ClinicPatient[]>([]);
+  const [patientId,setPatientId]=useState("");
+  const [patientsBusy,setPatientsBusy]=useState(false);
+  const [patientsError,setPatientsError]=useState("");
+  const [creating,setCreating]=useState(false);
+  const [newName,setNewName]=useState("");
+  const [newDob,setNewDob]=useState("");
+  const [importKey,setImportKey]=useState(0);
+  const [expanded,setExpanded]=useState<string|null>(null);
+  const selected=patients.find(pt=>pt.id===patientId)||null;
+  const linkedProfileId=selected?.profileId||"";
+
+  async function loadPatients(preferPatientId?:string){
+    setPatientsBusy(true);setPatientsError("");
+    try{
+      await api("clinic/seed-synthetic","POST",{});
+      const r=await api<{patients:ClinicPatient[]}>(`clinic/patients?practiceId=${SYNTHETIC.practiceId}`);
+      setPatients(r.patients);
+      const prefer=preferPatientId||patientId;
+      const next=r.patients.find(pt=>pt.id===prefer)||r.patients.find(pt=>pt.profileId===p.profileId)||r.patients.find(pt=>pt.id===SYNTHETIC.patients.aliceA.id)||r.patients[0];
+      if(next){
+        setPatientId(next.id);
+        if(next.profileId&&next.profileId!==p.profileId)p.onProfile(next.profileId);
+      }else setPatientId("");
+    }catch(e){setPatientsError((e as Error).message);}
+    finally{setPatientsBusy(false);}
+  }
+
+  useEffect(()=>{if(!p.signIn&&!p.loading)void loadPatients();},[p.signIn,p.loading]);
+
+  function selectPatient(id:string){
+    if(id===patientId)return;
+    const next=patients.find(pt=>pt.id===id);
+    setPatientId(id);
+    setImportKey(k=>k+1); // Changing patient clears/restarts pending import.
+    if(next?.profileId)p.onProfile(next.profileId);
+  }
+
+  async function createPatient(){
+    setPatientsBusy(true);setPatientsError("");
+    try{
+      await api("clinic/seed-synthetic","POST",{});
+      const r=await api<{patient:{id:string};profile:{id:string}}>("clinic/patients","POST",{
+        practiceId:SYNTHETIC.practiceId,
+        legalName:newName,
+        dob:newDob,
+      });
+      setCreating(false);setNewName("");setNewDob("");
+      setImportKey(k=>k+1);
+      await loadPatients(r.patient.id);
+      p.onProfile(r.profile.id);
+    }catch(e){setPatientsError((e as Error).message);}
+    finally{setPatientsBusy(false);}
+  }
+
   return <main className="staff-home">
-    <header className="staff-header"><a className="brand" href="/staff"><span className="brand-icon"><WalletCards size={22}/></span>MedCarry</a><span className="staff-label">Staff workspace</span></header>
-    <div className="staff-content"><div className="staff-title"><div><h1>{mode==="inbox"?"Clinic inbox":"Medication lists"}</h1><p>{mode==="inbox"?STAFF_INBOX_INTRO:"Demo lists"}</p></div>
-      <div className="staff-mode-switch"><button className={`button ${mode==="inbox"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Inbox</button><button className={`button ${mode==="lists"?"primary":"secondary"}`} disabled={p.busy} onClick={()=>setMode("lists")}>Lists</button></div>
-    </div>
+    <header className="staff-header">
+      <a className="brand" href="/staff"><span className="brand-icon"><WalletCards size={22}/></span>MedCarry</a>
+      <span className="staff-label">Staff workspace</span>
+      {mode==="import"&&<button type="button" className="button secondary staff-inbox-link" disabled={p.busy} onClick={()=>{setMode("inbox");p.onLoadInbox();}}>Inbox</button>}
+      {mode==="inbox"&&<button type="button" className="button secondary staff-inbox-link" disabled={p.busy} onClick={()=>setMode("import")}>Import</button>}
+    </header>
+    <div className="staff-content">
       {p.signIn?<div className="staff-empty"><h2>Sign in to continue.</h2><a className="button primary" href={p.signIn} target="_top">Sign in with ChatGPT<ChevronRight size={18}/></a></div>
-      :p.loading?<p className="loading-state"><LoaderCircle className="spin"/>Opening list…</p>:mode==="inbox"?<>
+      :p.loading?<p className="loading-state"><LoaderCircle className="spin"/>Opening workspace…</p>
+      :mode==="inbox"?<>
+        <div className="staff-title"><div><h1>Clinic inbox</h1><p>{STAFF_INBOX_INTRO}</p></div></div>
         <div className="staff-inbox-toolbar">
           <label className="field">Appointment date<input type="date" value={p.inboxDate} onChange={e=>p.onInboxDate(e.target.value)} disabled={p.inboxBusy||p.busy}/></label>
           <button className="button secondary" disabled={p.inboxBusy||p.busy} onClick={p.onLoadInbox}>{p.inboxBusy?"Loading…":"Refresh"}</button>
         </div>
-        {header&&<section className="staff-identity-header" aria-label="Patient identity for this appointment">
-          <div className="staff-identity-kicker">Patient</div>
-          <div className="staff-identity-grid">
-            <div><h2>{header.patient.legalName}</h2><p>DOB {formatDob(header.patient.dob)}{header.patient.postalCode?` · ZIP ${header.patient.postalCode}`:""}</p></div>
-            <div><strong>Appointment</strong><p>{formatAppointment(header.appointment.startsAt,header.appointment.timezone)} · {header.appointment.providerName}</p><p>{header.appointment.serviceName}</p></div>
-            <div><strong>Submission</strong><p>{statusLabel(header.submissionStatus)}</p><p>Aprima: {header.aprimaStatus.replaceAll("_"," ")}</p></div>
-          </div>
-        </section>}
         <section className="staff-inbox" aria-label="Appointment inbox">
           {p.inboxRows.length===0?<div className="staff-empty"><FileText size={30}/><h3>No appointments for this date.</h3><p>Choose another day, or use Testing tools to load the demo appointment.</p></div>
           :p.inboxRows.map(row=>{
@@ -80,32 +132,75 @@ export default function StaffHome(p:Props){
             </article>;
           })}
         </section>
-        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading…":"Load demo appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
-      </>:<>
-        <div className="staff-list-picker"><label className="field">Selected list<select value={p.profileId} onChange={e=>e.target.value==="new"?p.onNewProfile():p.onProfile(e.target.value)} disabled={p.processing||p.busy}>{!p.profiles.length&&<option value="">New medication list</option>}{p.profiles.map(profile=><option key={profile.id} value={profile.id}>{profile.name}</option>)}<option value="new">+ New list</option></select></label><a className="staff-patient-link" href={p.profileId?`/patient?profile=${p.profileId}`:"/patient"}>Open patient view<ArrowUpRight size={18}/></a></div>
-        <div className="staff-toolbar"><button className="button primary" disabled={p.processing||p.busy} onClick={p.onImport}><FileText size={19}/>Import a list</button><button className="button secondary" aria-expanded={adding} disabled={p.processing||p.busy} onClick={()=>setAdding(!adding)}><Plus size={19}/>Add medication</button></div>
-        {adding&&<div className="staff-add-options"><button className="button secondary" onClick={p.onCamera}><Camera size={18}/>Take picture</button><button className="button secondary" onClick={p.onUpload}><Upload size={18}/>Choose picture</button><button className="button secondary" onClick={p.onManual}>Type it in</button></div>}
-        <div className="staff-list-heading"><h2>{history?"Saved lists":"Medications"} <span>{history?p.cards.length:p.medications.length}</span></h2><button className="text-button" onClick={()=>setHistory(!history)}>{history?"Back to medications":"Local snapshots"}</button></div>
-        {history?<section>{p.cards.length?p.cards.map(card=><button className="saved-card" disabled={p.busy} key={card.id} onClick={()=>p.onOpenCard(card.id)}><FileText size={25}/><span><strong>{card.patient_name}</strong><span>{new Date(card.created_at).toLocaleDateString()} · {card.recipient}</span></span><ChevronRight size={20}/></button>):<p className="staff-empty">No local snapshots yet.</p>}</section>
-        :<section>
-          {flags.length>0&&<div className="staff-duplicate-flags" aria-label="Duplicate review flags">
-            <h3>Possible duplicates</h3>
-            {flags.map(flag=><article className="staff-medication" key={flag.id}>
-              <div>
-                <h3>{flag.flagType.replaceAll("_"," ")}</h3>
-                <p>{medLabel(flag.medicationAId)} · {medLabel(flag.medicationBId)}</p>
-                <p className="staff-uncertainty">{flag.explanation}</p>
-                <span className="status pending">{flag.status}</span>
-              </div>
-              {p.onDuplicateDismiss&&flag.status==="open"&&<button className="button secondary" disabled={p.busy} onClick={()=>p.onDuplicateDismiss!(flag.id)}>Dismiss</button>}
-            </article>)}
+        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onSeedClinic}>{p.identityBusy?"Loading…":"Load demo appointment"}</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
+      </>
+      :<>
+        <div className="staff-title"><div><h1>Import medications</h1><p>Choose a clinic patient, then import an older medication section.</p></div></div>
+        <section className="staff-patient-panel" aria-label="Patient for import">
+          <label className="field">Patient
+            <select value={patientId} disabled={patientsBusy||p.busy} onChange={e=>{
+              if(e.target.value==="__create"){setCreating(true);return;}
+              selectPatient(e.target.value);
+            }}>
+              {!patients.length&&<option value="">Select a patient</option>}
+              {patients.map(pt=><option key={pt.id} value={pt.id}>{pt.legalName} · DOB {formatDob(pt.dob)}{pt.profileId?"":" · needs list link"}</option>)}
+              <option value="__create">+ Create patient</option>
+            </select>
+          </label>
+          {selected&&<div className="staff-patient-header">
+            <h2>{selected.legalName}</h2>
+            <p>DOB {formatDob(selected.dob)}{selected.postalCode?` · ZIP ${selected.postalCode}`:""}</p>
+            <p className="staff-uncertainty">{selected.profileId?"Linked medication list ready for import.":"This patient has no linked medication list. Create a patient record that includes a list, or pick another patient."}</p>
           </div>}
-          {p.medications.length?<div className="staff-medications">{p.medications.map(m=><article className="staff-medication" key={m.id}><div><h3>{m.productName||"Unnamed medication"}</h3><p>{m.strengthUnknown?"Strength unsure":m.strength||"Strength missing"} · {m.formulation}</p><span className={`status ${isConfirmed(m)?"confirmed":"pending"}`}>{isConfirmed(m)?<Check size={13}/>:null}{isConfirmed(m)?"Confirmed":"Needs review"}</span>{(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure")&&<p className="staff-uncertainty">Unsure details</p>}</div><button className="button secondary" disabled={p.busy} onClick={()=>p.onReview(m)}>Review<ChevronRight size={17}/></button></article>)}</div>:<div className="staff-empty"><FileText size={30}/><h3>No medications yet.</h3><p>Import a list or add a medication.</p></div>}
-          {p.medications.length>0&&<div className="staff-list-footer"><p>{pending?`${pending} to confirm`:"All confirmed"}</p><button className="button secondary" disabled={!canCreateCard(p.medications)||p.busy} onClick={p.onCreateCard}>Save local snapshot<ChevronRight size={18}/></button></div>}
-        </section>}
-        <details className="staff-testing"><summary>Testing tools</summary><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onDemo}>Try a fictional label</button><button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onLoadSyntheticHeader}>{p.identityBusy?"Loading…":"Load demo appointment header"}</button><button className="text-button" disabled={p.processing||p.identityBusy||!p.identityHeader} onClick={p.onShowHelperHeader}>Show helper as respondent</button><a href="/wireframes">Design study<ArrowUpRight size={15}/></a></details>
+          {creating&&<div className="staff-create-patient">
+            <h3>Create patient</h3>
+            <p className="staff-uncertainty">Creates a new patient and linked medication list. Same name and date of birth do not merge with an existing patient.</p>
+            <label className="field">Legal name<input value={newName} maxLength={120} disabled={patientsBusy} onChange={e=>setNewName(e.target.value)}/></label>
+            <label className="field">Date of birth<input type="date" value={newDob} disabled={patientsBusy} onChange={e=>setNewDob(e.target.value)}/></label>
+            <div className="staff-create-actions">
+              <button className="button primary" disabled={patientsBusy||!newName.trim()||!newDob} onClick={()=>void createPatient()}>Create and continue</button>
+              <button className="text-button" disabled={patientsBusy} onClick={()=>setCreating(false)}>Cancel</button>
+            </div>
+          </div>}
+          {(patientsError||p.error)&&<div className="alert error" role="alert">{patientsError||p.error}</div>}
+          {patientsBusy&&!selected&&<p className="loading-state"><LoaderCircle className="spin"/>Loading patients…</p>}
+        </section>
+
+        {selected&&selected.profileId?<>
+          <section className="staff-import-workspace" aria-label="Medication import">
+            <h2>Import medication section</h2>
+            <p>Next: paste or read the older list for {selected.legalName}.</p>
+            <NoteImportPanel
+              key={`${importKey}:${selected.id}:${selected.profileId}`}
+              patientId={selected.id}
+              existing={p.medications}
+              ensureProfile={async()=>{
+                if(!selected.profileId)throw new Error("Select a patient with a linked medication list before importing.");
+                if(selected.profileId!==p.profileId)p.onProfile(selected.profileId);
+                return selected.profileId;
+              }}
+              onBusy={p.onBusy}
+              onSaved={p.onImportSaved}
+            />
+          </section>
+          {p.medications.length>0&&<section className="staff-medications" aria-label="Medications on this list">
+            <h2>On this list <span>{p.medications.length}</span></h2>
+            {p.medications.map(m=><article className="staff-medication" key={m.id}><div><h3>{m.productName||"Unnamed medication"}</h3><p>{m.strengthUnknown?"Strength unsure":m.strength||"Strength missing"} · {m.formulation}</p><span className={`status ${isConfirmed(m)?"confirmed":"pending"}`}>{isConfirmed(m)?"Confirmed":"Needs review"}</span></div><button className="button secondary" disabled={p.busy} onClick={()=>p.onReview(m)}>Review<ChevronRight size={17}/></button></article>)}
+            <button className="text-button" disabled={p.busy} onClick={p.onManual}>Type in one medicine</button>
+            {linkedProfileId&&<a className="staff-patient-link" href={`/patient?profile=${linkedProfileId}`}>Open patient view<ArrowUpRight size={18}/></a>}
+          </section>}
+        </>
+        :selected&&!selected.profileId?<div className="staff-empty"><h3>Import blocked</h3><p>This patient has no linked medication list. Create a new patient (which creates a linked list), or choose a different patient.</p></div>
+        :!creating&&<div className="staff-empty"><h3>Select a patient to import.</h3><p>Import binds to the patient record and linked medication list — not a display list name alone.</p></div>}
+
+        <details className="staff-testing"><summary>Testing tools</summary>
+          <button className="text-button" disabled={p.processing||p.identityBusy} onClick={()=>void loadPatients()}>Reload patients</button>
+          <button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onDemo}>Try a fictional label</button>
+          <button className="text-button" disabled={p.processing||p.identityBusy} onClick={p.onSeedClinic}>{p.identityBusy?"Loading…":"Load demo appointment"}</button>
+          <a href="/wireframes">Design study<ArrowUpRight size={15}/></a>
+        </details>
       </>}
-      {p.error&&<div className="alert error" role="alert">{p.error}</div>}
+      {p.error&&mode==="inbox"&&<div className="alert error" role="alert">{p.error}</div>}
     </div>
   </main>;
 }

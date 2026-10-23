@@ -12,3 +12,28 @@
 .patient-duplicate,.patient-cleanup{margin:0 0 22px;padding:18px;border:1px solid #c9d9e3;border-radius:12px;background:#f5f9fb}.patient-duplicate h2,.patient-cleanup h2{font-size:22px;margin:0 0 12px;letter-spacing:-.3px}.patient-duplicate-card{padding:14px 0;border-top:1px solid var(--border)}.patient-duplicate-card:first-of-type{border-top:0;padding-top:0}.patient-duplicate-actions{display:grid;gap:8px;margin-top:12px}.patient-duplicate-actions .patient-secondary,.patient-cleanup .patient-secondary{margin-top:0;min-height:52px;font-size:17px}.patient-cleanup .patient-secondary{margin-top:10px}.patient-cleanup p{font-size:18px;line-height:1.55;color:#526b7b;margin:0 0 8px}
 .patient-med-list{margin-top:28px;border-top:1px solid var(--border);padding-top:18px}.patient-med-list h2{font-size:22px;margin:0 0 6px;letter-spacing:-.3px}.patient-med-row{margin:12px 0}.patient-med-edit{display:flex;align-items:center;gap:2px;flex-shrink:0;color:var(--blue);font-size:17px;font-weight:600}.patient-similar{display:block;font-size:15px;font-style:normal;font-weight:500;color:#6a5a2e;margin-top:4px}
 .patient-label-directions{margin:0 0 18px;padding:14px 16px;border:1px solid #d5e2ea;border-radius:10px;background:#f7fafc}.patient-label-directions h4{font-size:15px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:#5d7686;margin:0 0 8px}.patient-label-directions p{font-size:18px;line-height:1.55;color:var(--ink);margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.patient-label-directions .patient-small{margin-top:8px}.patient-use-draft{margin:0 0 18px;padding:14px 16px;border-radius:10px;background:#fff7e8;color:#775820;font-size:17px;line-height:1.5}.patient-use-draft p{margin:0;color:#775820;font-size:17px}.patient-cleanup-banner{margin:0 0 18px;padding:14px 16px;border-radius:10px;background:#eef5f8;border:1px solid #c9d9e3;font-size:17px;line-height:1.5;color:#365468}.patient-cleanup-banner p{margin:0;font-size:17px;color:#365468}
+
+.patient-add-choices{display:grid;gap:4px;margin-top:8px}
+.patient-remove{display:block;width:100%;margin:0 0 14px;min-height:48px;border:0;background:none;color:#9f3e3b;font-size:17px;text-decoration:underline;text-underline-offset:4px;padding:8px 4px;text-align:left}
+.patient-remove-reasons{margin:0 0 18px;padding:14px 16px;border:1px solid #e2bdaa;border-radius:10px;background:#fff8f5}
+.patient-remove-reasons>p{font-size:17px;color:#823f2d;margin:0 0 10px}
+.patient-remove-reasons .patient-secondary{margin-top:8px;min-height:52px;font-size:17px}
+.patient-med-list .patient-med{margin-bottom:4px}
+
+.camera-sheet{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;background:#0f2430;color:#eef6f9;padding:env(safe-area-inset-top,0) env(safe-area-inset-right,0) env(safe-area-inset-bottom,0) env(safe-area-inset-left,0);max-height:100dvh;overflow:hidden}
+.camera-sheet-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;flex-shrink:0}
+.camera-sheet-bar strong{flex:1;text-align:center;font-size:18px;letter-spacing:-.2px}
+.camera-sheet-close,.camera-sheet-spacer{width:48px;min-height:48px;display:grid;place-items:center;border:0;background:transparent;color:#eef6f9;border-radius:10px}
+.camera-sheet-help{margin:0;padding:0 18px 10px;font-size:16px;line-height:1.45;color:#c5d8e2;flex-shrink:0}
+.camera-sheet-view{position:relative;flex:1 1 auto;min-height:0;margin:0 14px;border-radius:14px;overflow:hidden;background:#07141c;display:flex;align-items:center;justify-content:center}
+.camera-sheet-view video{width:100%;height:100%;object-fit:cover;background:#000}
+.camera-sheet-status{position:absolute;display:flex;gap:10px;align-items:center;color:#d7e8ef;font-size:16px}
+.camera-sheet-error{margin:10px 16px 0;padding:12px 14px;border-radius:10px;background:#5a241c;color:#ffe8e1;font-size:16px;line-height:1.45;flex-shrink:0}
+.camera-sheet-actions{flex-shrink:0;display:flex;flex-direction:column;gap:10px;padding:14px 16px calc(16px + env(safe-area-inset-bottom,0));background:#0f2430}
+.camera-sheet-actions .button{width:100%;min-height:60px;font-size:19px}
+.camera-sheet-actions .patient-text{color:#d7e8ef;margin-top:0;text-align:center}
+@media(max-width:420px){
+  .camera-sheet-help{font-size:15px;padding-bottom:8px}
+  .camera-sheet-view{margin:0 10px}
+  .camera-sheet-actions{padding:12px 12px calc(14px + env(safe-area-inset-bottom,0))}
+}

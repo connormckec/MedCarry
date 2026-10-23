@@ -2,15 +2,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Camera, Upload, Plus, WalletCards, Check, X, FileText, ChevronRight, ShieldCheck, Search, LoaderCircle, AlertCircle, Printer, Download, ScanLine, CircleHelp } from "lucide-react";
 import { emptyMedication, formulations, frequencies, units, isConfirmed, useSummary, reportedAmount, validateFields, snapshotText, type MedicationFields, type Medication, type Profile, type Snapshot } from "@/lib/medication";
-import type { StaffIdentityHeader } from "@/lib/clinic-identity";
 import { SYNTHETIC } from "@/lib/synthetic-clinic";
 import { recognizeLabels, preparePhoto } from "@/lib/ocr";
 import { ocrExcerpt } from "@/lib/ocr-text";
 import { api } from "@/lib/client-api";
 import { historicalUseProposal } from "@/lib/note-import";
-import { PATIENT_SEND_CTA } from "@/lib/clinic-submission";
 import GuidedPatientHome from "./guided-patient-home";
-import NoteImportPanel from "./note-import-panel";
 import PatientMedicationEditor from "./patient-medication-editor";
 import StaffHome from "./staff-home";
 
@@ -44,11 +41,11 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   const [loading,setLoading]=useState(true),[error,setError]=useState(""),[signIn,setSignIn]=useState("");
   const [editor,setEditor]=useState<Editor|null>(null),[busy,setBusy]=useState(false),[formError,setFormError]=useState(""),[toast,setToast]=useState("");
   const [processing,setProcessing]=useState(false),[processMessage,setProcessMessage]=useState(""),[camera,setCamera]=useState(false),[cameraError,setCameraError]=useState(""),[cameraReady,setCameraReady]=useState(false);
-  const [noteImport,setNoteImport]=useState(false),[importBusy,setImportBusy]=useState(false);
+  const [importBusy,setImportBusy]=useState(false);
   const [creatingProfile,setCreatingProfile]=useState(false),[newProfileName,setNewProfileName]=useState("");
-  const [cardForm,setCardForm]=useState(false),[recipient,setRecipient]=useState(""),[patientName,setPatientName]=useState(""),[card,setCard]=useState<Snapshot|null>(null);
+  const [card,setCard]=useState<Snapshot|null>(null);
   const [clinicReceipt,setClinicReceipt]=useState<{id:string;deliveryStatus:"pending"|"received";deliveryLabel:string;receivingClinic:string;emptyListAttested:boolean;payload?:Snapshot&{medications:Medication[]}}|null>(null);
-  const [identityHeader,setIdentityHeader]=useState<StaffIdentityHeader|null>(null),[identityBusy,setIdentityBusy]=useState(false);
+  const [identityBusy,setIdentityBusy]=useState(false);
   const [searching,setSearching]=useState(false),[matches,setMatches]=useState<{rxCui:string;name:string}[]>([]),[searchMessage,setSearchMessage]=useState("");
   const [openDrafts,setOpenDrafts]=useState<EditorDraft[]>([]),[saveState,setSaveState]=useState<""|"saving"|"saved"|"error">("");
   const [undoHint,setUndoHint]=useState<UndoHint|null>(null);
@@ -58,7 +55,7 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   const [inboxDate,setInboxDate]=useState("2026-11-03"),[inboxRows,setInboxRows]=useState<InboxRow[]>([]),[inboxBusy,setInboxBusy]=useState(false),[reviewDetail,setReviewDetail]=useState<ReviewDetail|null>(null);
   const labelTarget=useRef<Editor|null>(null);
   const uploadRef=useRef<HTMLInputElement>(null),captureRef=useRef<HTMLInputElement>(null),videoRef=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),ocrAbort=useRef<AbortController|null>(null),listRequest=useRef(0),cardRequest=useRef(""),submitRequest=useRef(""),cameraSession=useRef(0),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),editorRef=useRef<Editor|null>(null);
-  const selected=profiles.find(p=>p.id===profileId);
+  const selected=profiles.find(pr=>pr.id===profileId);
   useEffect(()=>{editorRef.current=editor;},[editor]);
   useEffect(()=>{void bootstrap();return()=>{streamRef.current?.getTracks().forEach(t=>t.stop());ocrAbort.current?.abort();if(draftTimer.current)clearTimeout(draftTimer.current);};},[]);
   useEffect(()=>{if(toast){const timer=setTimeout(()=>setToast(""),4500);return()=>clearTimeout(timer);}},[toast]);
@@ -85,7 +82,6 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
       const alice=r.profiles.find(p=>p.id===SYNTHETIC.aliceProfileId);
       const first=r.profiles.find(p=>p.id===requested)||alice||r.profiles[0];
       if(first){setProfileId(first.id);await loadList(first.id);}
-      if(!guided)await loadInbox().catch(()=>{/* loadInbox sets error */});
     }catch(e){const err=e as Error&{signInUrl?:string};if(err.signInUrl)setSignIn(err.signInUrl);else setError(err.message);}
     finally{setLoading(false);}
   }
@@ -132,24 +128,7 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
   }catch(e){setFormError((e as Error).message);if((e as {status?:number}).status===409&&profileId){await loadList(profileId).catch(()=>{});}}finally{setBusy(false);}}
   async function reportChange(reason:"no_longer_take"|"added_by_mistake"){
     if(!editor?.id)return;
-    const copy=reason==="no_longer_take"
-      ?"Record that you no longer take this? This keeps the medicine in your history for clinic review. It does not discontinue a prescription."
-      :"Remove this from your active list as added by mistake? You can Undo. Older records stay available.";
-    if(!window.confirm(copy))return;
-    setBusy(true);setFormError("");
-    try{
-      const r=await api<{changeEventId:string;medication?:Medication;revision?:number;suppressed?:boolean}>(`medication/${editor.id}/change`,"POST",{revision:editor.revision,reason});
-      await loadList(profileId);
-      setEditor(null);
-      if(reason==="added_by_mistake"){
-        setCleanupPair(null);
-        setUndoHint({medicationId:editor.id,revision:r.revision||((editor.revision||1)+1),changeEventId:r.changeEventId,label:"Removed as added by mistake."});
-        setToast("Removed from your list. Undo is available.");
-      }else{
-        setUndoHint({medicationId:editor.id,revision:r.medication?.revision||((editor.revision||1)+1),changeEventId:r.changeEventId,label:"Marked as no longer taking."});
-        setToast("Saved: you no longer take this. Confirm again if you undo.");
-      }
-    }catch(e){setFormError((e as Error).message);}finally{setBusy(false);}
+    await reportChangeFor(editor.id,editor.revision,reason,editor.fields.productName||"this medicine");
   }
   async function undoChange(){
     if(!undoHint)return;setBusy(true);setError("");
@@ -168,22 +147,118 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
         const ocr=await recognizeLabels(images,setProcessMessage,abort.signal);
         if(ocr.text.trim().length<6)throw new Error("No readable text was found. The photos are saved; enter the details from the label.");
         setProcessMessage("Organizing the label details…");
-        const r=await api<{fields:MedicationFields;notices:string[]}>("parse","POST",{text:ocr.text});
+        const r=await api<{fields:MedicationFields;notices:string[];spellingCorrected?:boolean;ambiguous?:boolean;categoryNeedsAsk?:boolean}>("parse","POST",{text:ocr.text,profileId:pid});
         fields=r.fields;notices=r.notices;
         notices.unshift(`Text read from the photo (check against the label): ${ocrExcerpt(ocr.text)}`);
+        if(r.spellingCorrected)notices.unshift("Suggested name spelling is in the draft — check it against the bottle.");
+        if(r.ambiguous)notices.unshift("More than one possible medicine matched. Check the name and strength on the bottle.");
+        if(r.categoryNeedsAsk)notices.push("Confirm whether this is a prescription, over-the-counter medicine, or vitamin/supplement.");
         if(ocr.weak||!fields.productName.trim())notices.push("The label reader was unsure. Keep what looks right, fix the rest, or mark details unsure before confirming.");
+        if(fields.category==="supplement"&&fields.productName.trim().length>=3){
+          try{
+            setProcessMessage("Checking the NIH supplement catalog…");
+            const q=new URLSearchParams({q:fields.productName.slice(0,120)});
+            if(fields.strength.trim())q.set("strength",fields.strength.slice(0,100));
+            const dsld=await api<{matches:{id:string;fullName:string;brandName:string;servingSummary:string}[];available:boolean;note:string}>(`dsld/search?${q}`);
+            if(!dsld.available)notices.push(dsld.note||"Supplement catalog unavailable. Enter label details manually.");
+            else if(dsld.matches.length===1){
+              const hit=dsld.matches[0];
+              const label=`${hit.brandName?hit.brandName+" ":""}${hit.fullName}`.trim();
+              notices.push(`NIH DSLD match proposed: ${label}. Confirm brand and serving size on the bottle.`);
+              if(hit.servingSummary&&!fields.supplementFacts.includes(hit.servingSummary)){
+                fields={...fields,supplementFacts:`Label serving size: ${hit.servingSummary} (per serving on the label — not your reported use)\nBrand/product: ${label}\nSource: NIH DSLD ${hit.id}${fields.supplementFacts?`\n\n${fields.supplementFacts}`:""}`.slice(0,2500),referenceName:`DSLD:${hit.id} ${hit.fullName}`.slice(0,300)};
+              }
+            }else if(dsld.matches.length>1){
+              notices.push("Several supplement products matched. Confirm the brand and form on the bottle, or enter Supplement Facts manually.");
+            }else{
+              notices.push("No NIH DSLD match. Enter the product from the label, including Supplement Facts if needed.");
+            }
+          }catch{notices.push("Supplement catalog lookup failed. Enter the label details manually.");}
+        }
       }catch(e){notices=[(e as Error).message,"Your photos are saved. Complete the fields manually before confirming."];}
       if(target){fields={...fields,sourceDocument:target.fields.sourceDocument,sourceDate:target.fields.sourceDate,sourceText:target.fields.sourceText};notices.unshift(`New label for the existing entry: ${target.fields.productName} ${target.fields.strength}. Compare the identity and strength before saving.`);}setEditor({fields,sourceIds:[...(target?.sourceIds||[]),...saved],id:target?.id,revision:target?.revision,notices,newSources:[...(target?.newSources||[]),...saved],quick:quickReview(fields)});setFormError("");setMatches([]);setSearchMessage("");opened=true;
     }catch(e){setError((e as Error).message);}finally{setProcessing(false);ocrAbort.current=null;if(!opened)for(const uid of saved){await api(`upload/${uid}`,"DELETE").catch(()=>{});}}
   }
-  function closeCamera(){cameraSession.current++;streamRef.current?.getTracks().forEach(t=>t.stop());streamRef.current=null;setCamera(false);setCameraReady(false);}
-  async function startCamera(target?:Editor){labelTarget.current=target||null;const session=++cameraSession.current;setCamera(true);setCameraReady(false);setCameraError("");try{if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera is unavailable. Choose a picture or type it in.");const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}},audio:false});if(session!==cameraSession.current){stream.getTracks().forEach(t=>t.stop());return;}streamRef.current=stream;if(!videoRef.current)await new Promise<void>(r=>requestAnimationFrame(()=>r()));if(videoRef.current&&session===cameraSession.current){videoRef.current.srcObject=stream;await videoRef.current.play();}else stream.getTracks().forEach(t=>t.stop());}catch(e){if(session===cameraSession.current)setCameraError((e as Error).name==="NotAllowedError"?"Camera access is off. Choose a picture or type it in.":"We couldn't open the camera. Choose a picture or type it in.");}}
-  async function snap(){const video=videoRef.current;if(!video||!video.videoWidth)return;const canvas=document.createElement("canvas");canvas.width=video.videoWidth;canvas.height=video.videoHeight;canvas.getContext("2d")?.drawImage(video,0,0);const blob=await new Promise<Blob|null>(r=>canvas.toBlob(r,"image/jpeg",.95));if(blob){const target=labelTarget.current;labelTarget.current=null;closeCamera();await processFiles([blob],target||undefined);}}
+  function markCameraReady(){
+    const video=videoRef.current;
+    if(video&&video.videoWidth>0&&video.readyState>=2)setCameraReady(true);
+  }
+  function closeCamera(){
+    cameraSession.current++;
+    streamRef.current?.getTracks().forEach(t=>t.stop());
+    streamRef.current=null;
+    if(videoRef.current)videoRef.current.srcObject=null;
+    setCamera(false);setCameraReady(false);setCameraError("");
+  }
+  async function startCamera(target?:Editor){
+    labelTarget.current=target||null;
+    const session=++cameraSession.current;
+    setCamera(true);setCameraReady(false);setCameraError("");
+    try{
+      if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera is unavailable. Choose a picture or type it in.");
+      const stream=await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},
+        audio:false,
+      });
+      if(session!==cameraSession.current){stream.getTracks().forEach(t=>t.stop());return;}
+      streamRef.current=stream;
+      if(!videoRef.current)await new Promise<void>(r=>requestAnimationFrame(()=>r()));
+      const video=videoRef.current;
+      if(video&&session===cameraSession.current){
+        video.srcObject=stream;
+        video.onloadedmetadata=()=>markCameraReady();
+        video.onplaying=()=>markCameraReady();
+        await video.play();
+        markCameraReady();
+      }else stream.getTracks().forEach(t=>t.stop());
+    }catch(e){
+      if(session===cameraSession.current){
+        streamRef.current?.getTracks().forEach(t=>t.stop());
+        streamRef.current=null;
+        setCameraReady(false);
+        setCameraError((e as Error).name==="NotAllowedError"
+          ?"Camera access is off. Choose a picture or type it in."
+          :"We couldn't open the camera. Choose a picture or type it in.");
+      }
+    }
+  }
+  async function snap(){
+    const video=videoRef.current;
+    if(!video||!cameraReady||!video.videoWidth||video.readyState<2)return;
+    const canvas=document.createElement("canvas");
+    canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+    canvas.getContext("2d")?.drawImage(video,0,0);
+    const blob=await new Promise<Blob|null>(r=>canvas.toBlob(r,"image/jpeg",.95));
+    if(blob){const target=labelTarget.current;labelTarget.current=null;closeCamera();await processFiles([blob],target||undefined);}
+  }
+  function openPhotoPath(target?:Editor){
+    // Prefer in-app camera when available; native picker remains on the camera sheet.
+    void startCamera(target);
+  }
+  async function reportChangeFor(medicationId:string,revision:number|undefined,reason:"no_longer_take"|"added_by_mistake",productLabel:string){
+    const copy=reason==="no_longer_take"
+      ?"Record that you no longer take this? This keeps the medicine in your history for clinic review. It does not discontinue a prescription."
+      :"Remove this from your active list as added by mistake? You can Undo. Older records stay available.";
+    if(!window.confirm(copy))return;
+    setBusy(true);setError("");
+    try{
+      const r=await api<{changeEventId:string;medication?:Medication;revision?:number}>(`medication/${medicationId}/change`,"POST",{revision,reason});
+      await loadList(profileId);
+      setEditor(null);
+      if(reason==="added_by_mistake"){
+        setCleanupPair(null);
+        setUndoHint({medicationId,revision:r.revision||((revision||1)+1),changeEventId:r.changeEventId,label:`Removed ${productLabel}.`});
+        setToast("Removed from your list. Undo is available.");
+      }else{
+        setUndoHint({medicationId,revision:r.medication?.revision||((revision||1)+1),changeEventId:r.changeEventId,label:`Marked ${productLabel} as no longer taking.`});
+        setToast("Saved: you no longer take this. Confirm again if you undo.");
+      }
+    }catch(e){setError((e as Error).message);}finally{setBusy(false);}
+  }
   async function demo(){setProcessing(true);setProcessMessage("Adding a fictional example label…");try{
     const canvas=document.createElement("canvas");canvas.width=1400;canvas.height=1050;const c=canvas.getContext("2d")!;c.fillStyle="#fff";c.fillRect(0,0,1400,1050);c.fillStyle="#173f50";c.fillRect(0,0,1400,160);c.fillStyle="#fff";c.font="bold 58px Arial";c.fillText("DEMO PHARMACY",70,102);c.fillStyle="#111";c.font="32px Arial";c.fillText("FICTIONAL LABEL · FOR PRODUCT TESTING",70,230);c.font="bold 56px Arial";c.fillText("METOPROLOL TARTRATE 25 MG TABLETS",70,370);c.font="44px Arial";c.fillText("Take 1 tablet by mouth twice daily.",70,480);c.fillText("With meals.",70,550);c.font="30px Arial";c.fillText("This is a demo label, not a prescription.",70,780);const blob=await new Promise<Blob|null>(r=>canvas.toBlob(r,"image/png"));if(blob){setProcessing(false);await processFiles([blob]);}
   }catch(e){setError((e as Error).message);setProcessing(false);}}
   async function openCard(cid:string){setError("");setBusy(true);try{const r=await api<{card:Snapshot}>(`card/${cid}`);setCard(r.card);}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
-  async function createCard(details?:{patientName:string;recipient:string}){setBusy(true);setFormError("");try{if(!cardRequest.current)cardRequest.current=crypto.randomUUID();const r=await api<{id:string}>("card","POST",{profileId,recipient:details?.recipient||recipient,patientName:details?.patientName||patientName,idempotencyKey:cardRequest.current});const detail=await api<{card:Snapshot}>(`card/${r.id}`);setCardForm(false);setCard(detail.card);cardRequest.current="";await loadList(profileId);setToast("Local snapshot saved.");}catch(e){setFormError((e as Error).message);}finally{setBusy(false);}}
   async function sendToClinic(opts:{emptyListAttested:boolean}){
     setBusy(true);setError("");
     try{
@@ -202,8 +277,7 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
     }catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
   function downloadCard(){if(!card)return;const blob=new Blob([snapshotText(card)],{type:"text/plain;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="medication-list-local-only.txt";a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}
-  function finishList(){setPatientName(selected?.name||"");setRecipient("Innovation Cardiology");cardRequest.current="";setCardForm(true);setFormError("");}
-  async function loadSyntheticHeader(respondentId?:string){setIdentityBusy(true);setError("");try{await api("clinic/seed-synthetic","POST",{});const q=new URLSearchParams({appointment:SYNTHETIC.appointmentAliceA.id});if(respondentId)q.set("respondent",respondentId);const r=await api<{header:StaffIdentityHeader}>(`clinic/staff-header?${q}`);setIdentityHeader(r.header);setToast(respondentId?"Helper respondent shown.":"Demo appointment loaded.");}catch(e){setError((e as Error).message);}finally{setIdentityBusy(false);}}
+  async function loadSyntheticHeader(){setIdentityBusy(true);setError("");try{await api("clinic/seed-synthetic","POST",{});await api(`clinic/staff-header?appointment=${SYNTHETIC.appointmentAliceA.id}`);setToast("Demo appointment loaded.");}catch(e){setError((e as Error).message);}finally{setIdentityBusy(false);}}
   async function loadInbox(date=inboxDate){
     setInboxBusy(true);setError("");
     try{
@@ -234,12 +308,29 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
     }catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
   return <div className={guided?"guided-session":"staff-session"}>
-    {guided?<GuidedPatientHome medications={meds} loading={loading} signIn={signIn} error={error} processing={processing||busy} clinicReceipt={clinicReceipt} resumeDraft={openDrafts[0]||null} duplicateFlags={duplicateFlags.filter(f=>f.status==="open")} duplicatePrompt={duplicatePrompt} cleanupPair={cleanupPair} onDuplicateRespond={(id,response)=>void respondDuplicate(id,response)} onCleanupDismiss={()=>setCleanupPair(null)} onCamera={()=>void startCamera()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onResumeDraft={d=>resumeDraft(d)} onSendToClinic={opts=>void sendToClinic(opts)} onViewReceipt={()=>{if(clinicReceipt?.payload)setCard({id:clinicReceipt.id,recipient:clinicReceipt.receivingClinic,patientName:(clinicReceipt.payload as {identity?:{patient?:{legalName?:string}}}).identity?.patient?.legalName||selected?.name||"Patient",createdAt:new Date().toISOString(),medications:clinicReceipt.payload.medications||[]});}} onChangeList={()=>{setClinicReceipt(null);submitRequest.current="";}}/>
-    :<StaffHome profiles={profiles} profileId={profileId} medications={meds} cards={cards} loading={loading} signIn={signIn} error={error} busy={busy} processing={processing} identityHeader={identityHeader} identityBusy={identityBusy} duplicateFlags={duplicateFlags} inboxDate={inboxDate} inboxRows={inboxRows} inboxBusy={inboxBusy} onDuplicateDismiss={id=>void respondDuplicate(id,"staff_dismissed")} onProfile={pid=>void switchProfile(pid)} onNewProfile={()=>{setCreatingProfile(true);setFormError("");}} onImport={()=>setNoteImport(true)} onCamera={()=>void startCamera()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onCreateCard={finishList} onOpenCard={cid=>void openCard(cid)} onDemo={()=>void demo()} onLoadSyntheticHeader={()=>void loadSyntheticHeader()} onShowHelperHeader={()=>void loadSyntheticHeader(SYNTHETIC.respondentHelper.id)} onLoadInbox={()=>void loadInbox()} onInboxDate={d=>{setInboxDate(d);void loadInbox(d);}} onReviewSubmission={id=>void openReview(id)}/>}
+    {guided?<GuidedPatientHome medications={meds} loading={loading} signIn={signIn} error={error} processing={processing||busy} clinicReceipt={clinicReceipt} resumeDraft={openDrafts[0]||null} duplicateFlags={duplicateFlags.filter(f=>f.status==="open")} duplicatePrompt={duplicatePrompt} cleanupPair={cleanupPair} onDuplicateRespond={(id,response)=>void respondDuplicate(id,response)} onCleanupDismiss={()=>setCleanupPair(null)} onPhoto={()=>void openPhotoPath()} onUpload={()=>{labelTarget.current=null;uploadRef.current?.click();}} onManual={openManual} onReview={openEditor} onRemove={(m,reason)=>void reportChangeFor(m.id,m.revision,reason,m.productName||"this medicine")} onResumeDraft={d=>resumeDraft(d)} onSendToClinic={opts=>void sendToClinic(opts)} onViewReceipt={()=>{if(clinicReceipt?.payload)setCard({id:clinicReceipt.id,recipient:clinicReceipt.receivingClinic,patientName:(clinicReceipt.payload as {identity?:{patient?:{legalName?:string}}}).identity?.patient?.legalName||selected?.name||"Patient",createdAt:new Date().toISOString(),medications:clinicReceipt.payload.medications||[]});}} onChangeList={()=>{setClinicReceipt(null);submitRequest.current="";}}/>
+    :<StaffHome profiles={profiles} profileId={profileId} medications={meds} loading={loading} signIn={signIn} error={error} busy={busy||importBusy} processing={processing} identityBusy={identityBusy} inboxDate={inboxDate} inboxRows={inboxRows} inboxBusy={inboxBusy} onProfile={pid=>void switchProfile(pid)} onManual={openManual} onReview={openEditor} onLoadInbox={()=>void loadInbox()} onInboxDate={d=>{setInboxDate(d);void loadInbox(d);}} onReviewSubmission={id=>void openReview(id)} onDemo={()=>void demo()} onSeedClinic={()=>void loadSyntheticHeader()} ensureProfile={ensureProfile} onImportSaved={async pid=>{await loadList(pid);setToast("Historical drafts imported. Patient still needs to check each medicine.");}} onBusy={setImportBusy}/>}
     <input ref={uploadRef} type="file" accept="image/*" multiple hidden onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";const target=labelTarget.current;labelTarget.current=null;void processFiles(files,target||undefined);}}/>
     <input ref={captureRef} type="file" accept="image/*" capture="environment" hidden onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";const target=labelTarget.current;labelTarget.current=null;closeCamera();void processFiles(files,target||undefined);}}/>
     {processing&&<Modal title="Reading your label" onClose={()=>{}} locked><div className="processing-content"><div className="scanner-symbol"><ScanLine size={37}/></div><h3 aria-live="polite">{processMessage}</h3><p>Keep this page open. Check the details next.</p><button className="button secondary" onClick={()=>ocrAbort.current?.abort()} disabled={!ocrAbort.current}>Type it in instead</button></div></Modal>}
-    {camera&&<Modal title="Take a picture" onClose={closeCamera}><div className="camera-content"><p>Show the name and directions on one bottle.</p><div className="camera-view"><video ref={videoRef} playsInline muted onLoadedMetadata={()=>setCameraReady(true)}/>{!cameraReady&&!cameraError&&<span><LoaderCircle className="spin"/>Opening camera…</span>}</div>{cameraError&&<div className="alert error" role="alert">{cameraError}</div>}<div className="dialog-actions">{!cameraError&&<button className="button primary" disabled={!cameraReady} onClick={()=>void snap()}><Camera size={21}/>Take picture</button>}<button className={`button ${cameraError?"primary":"secondary"}`} onClick={()=>captureRef.current?.click()}><Upload size={20}/>Choose a picture</button>{cameraError&&<button className="patient-text" onClick={()=>{const target=labelTarget.current;labelTarget.current=null;closeCamera();if(target)setEditor({...target,quick:false});else openManual();}}>Type it in instead</button>}</div></div></Modal>}
+    {camera&&<div className="camera-sheet" role="dialog" aria-modal="true" aria-label="Take a picture">
+      <div className="camera-sheet-bar">
+        <button type="button" className="camera-sheet-close" aria-label="Close camera" onClick={closeCamera}><X size={24}/></button>
+        <strong>Take a picture</strong>
+        <span className="camera-sheet-spacer"/>
+      </div>
+      <p className="camera-sheet-help">Show the name and directions on one bottle.</p>
+      <div className="camera-sheet-view">
+        <video ref={videoRef} playsInline muted autoPlay onLoadedMetadata={markCameraReady} onPlaying={markCameraReady}/>
+        {!cameraReady&&!cameraError&&<span className="camera-sheet-status"><LoaderCircle className="spin"/>Opening camera…</span>}
+      </div>
+      {cameraError&&<div className="camera-sheet-error" role="alert">{cameraError}</div>}
+      <div className="camera-sheet-actions">
+        {!cameraError&&<button type="button" className="button primary" disabled={!cameraReady} onClick={()=>void snap()}><Camera size={22}/>Take picture</button>}
+        <button type="button" className={`button ${cameraError?"primary":"secondary"}`} onClick={()=>captureRef.current?.click()}><Upload size={20}/>Choose a picture</button>
+        <button type="button" className="patient-text" onClick={()=>{const target=labelTarget.current;labelTarget.current=null;closeCamera();if(target)setEditor({...target,quick:false});else openManual();}}>Type it in instead</button>
+      </div>
+    </div>}
     {editor&&!camera&&!processing&&<Modal title={editor.advanced?"Medication details":editor.cleanupFocus?"Clean up this medication":editor.id?"Check this medication":"Add a medication"} onClose={()=>void closeEditor()} wide={!!editor.advanced} locked={busy}>{guided||!editor.advanced?<div className="guided-session"><PatientMedicationEditor key={`${editor.id||"new"}:${editor.sourceIds.join(",")}:${editor.cleanupFocus?"cleanup":"edit"}`} fields={editor.fields} sourceIds={editor.sourceIds} notices={editor.notices} existing={!!editor.id} quick={!!editor.quick} cleanupFocus={!!editor.cleanupFocus} busy={busy} error={formError} saveState={saveState} onField={field} onForm={changeForm} onSave={confirm=>void save(confirm)} onUnsure={()=>void save(true,{status:"unsure"})} onNoLongerTake={()=>void reportChange("no_longer_take")} onAddedByMistake={()=>void reportChange("added_by_mistake")} onCamera={()=>void startCamera(editor)} onAdvanced={guided?undefined:()=>setEditor(e=>e?{...e,advanced:true,quick:false}:e)}/></div>:<><div className="editor-content">
       <div className="source-strip">{editor.sourceIds.length?<><div className="source-images">{editor.sourceIds.map(uid=><a key={uid} href={`/api/upload/${uid}`} target="_blank" rel="noopener noreferrer"><img src={`/api/upload/${uid}`} alt="Open the original medication label"/></a>)}</div><div><strong>Your source label</strong><p>Tap a photo to compare the original.</p></div></>:<><span className="section-icon"><FileText size={21}/></span><div><strong>{editor.fields.source==="note"?"Imported historical entry":"Manual entry"}</strong><p>Use the product label and your current routine.</p></div></>}</div>
       {editor.id&&editor.sourceIds.length<4&&<button className="button secondary full" disabled={busy} onClick={()=>void startCamera(editor)}><Camera size={19}/>Add a photo of this medicine</button>}
@@ -258,9 +349,7 @@ export default function MedicationApp({guided=false}:{guided?:boolean}){
       </div>
       <div className="confirmation-box"><ShieldCheck size={20}/><p>By confirming, you acknowledge that you reviewed this medication's identity, strength, and your reported use, including any uncertainty marked above.</p></div>{formError&&<div className="alert error" role="alert"><AlertCircle size={17}/>{formError}</div>}
     </div><div className="dialog-bottom"><div className="dialog-actions">{editor.id&&<><button className="text-button" disabled={busy} onClick={()=>void reportChange("no_longer_take")}>I no longer take this</button><button className="text-button" disabled={busy} onClick={()=>void reportChange("added_by_mistake")}>Added by mistake</button></>}</div><div className="dialog-actions"><button className="button secondary" disabled={busy} onClick={()=>void save(false)}>Save draft</button><button className="button primary" disabled={busy} onClick={()=>void save(true)}>{busy?<LoaderCircle className="spin" size={17}/>:<Check size={17}/>}Confirm this medication</button></div></div></>}</Modal>}
-    {!guided&&noteImport&&<Modal title="Import a list" onClose={()=>setNoteImport(false)} wide locked={importBusy}><NoteImportPanel existing={meds} ensureProfile={ensureProfile} onBusy={setImportBusy} onSaved={async pid=>{await loadList(pid);setNoteImport(false);setToast("Historical drafts imported. Check each medicine in the patient view.");}}/></Modal>}
     {!guided&&creatingProfile&&<Modal title="Create a separate list" onClose={()=>setCreatingProfile(false)} locked={busy}><div className="simple-form"><p>Keep each person's medications in a separate list under your account.</p><label className="field">List name<input value={newProfileName} maxLength={80} placeholder="e.g. My medication list" onChange={e=>setNewProfileName(e.target.value)}/></label>{formError&&<div className="alert error" role="alert">{formError}</div>}<button className="button primary full" disabled={busy||!newProfileName.trim()} onClick={()=>void makeProfile()}>Create list<Plus size={17}/></button></div></Modal>}
-    {!guided&&cardForm&&<Modal title="Save local snapshot" onClose={()=>setCardForm(false)} locked={busy}><div className="simple-form"><p>Save a dated copy on this account.</p><label className="field">Patient or list name<input value={patientName} maxLength={120} onChange={e=>setPatientName(e.target.value)}/></label><label className="field">Prepared for<input value={recipient} maxLength={120} onChange={e=>setRecipient(e.target.value)}/></label><p className="field-help">Clinic send uses “{PATIENT_SEND_CTA}” from the patient view.</p>{formError&&<div className="alert error" role="alert">{formError}</div>}<button className="button primary full" disabled={busy||!recipient.trim()||!patientName.trim()} onClick={()=>void createCard()}>{busy?<LoaderCircle className="spin" size={20}/>:<Check size={20}/>}Save local snapshot</button></div></Modal>}
     {reviewDetail&&<Modal title="Review submission" onClose={()=>setReviewDetail(null)} wide locked={busy}><div className="editor-content">
       <p className="field-help">{reviewDetail.deliveryLabel} · {reviewDetail.receivingClinic}</p>
       {reviewDetail.patient&&<div className="quick-identity"><h3>{reviewDetail.patient.legalName}</h3><p>DOB {reviewDetail.patient.dob}{reviewDetail.patient.postalCode?` · ZIP ${reviewDetail.patient.postalCode}`:""}</p></div>}

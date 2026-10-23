@@ -7,3 +7,21 @@
 .staff-duplicate-flags{margin:0 0 22px;padding:16px 18px;border:1px solid #d5e2ea;border-radius:12px;background:#f7fafb}.staff-duplicate-flags>h3{font-size:16px;margin:0 0 6px}.staff-duplicate-flags>.staff-uncertainty{margin-bottom:12px}
 
 .staff-mode-switch{display:flex;gap:8px;margin-top:12px}.staff-inbox-toolbar{display:flex;gap:12px;align-items:end;margin:18px 0;flex-wrap:wrap}.staff-inbox-toolbar .field{margin:0;min-width:180px}.staff-inbox{display:grid;gap:12px;margin-top:10px}.staff-inbox-row{border:1px solid #d5e2ea;border-radius:12px;padding:16px 18px;background:#fff;display:grid;gap:12px;grid-template-columns:1fr auto}.staff-inbox-main h3{font-size:18px;margin:0 0 6px}.staff-inbox-main p{margin:0;font-size:14px;color:#355466}.staff-inbox-status{font-weight:600;color:#234c66!important;margin-top:8px!important}.staff-inbox-actions{display:flex;flex-direction:column;gap:8px;align-items:stretch}.staff-inbox-detail{grid-column:1/-1;border-top:1px solid #e1e7e9;padding-top:12px;font-size:14px;color:#526b7b}.staff-title{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+
+.staff-inbox-link{margin-left:auto;min-height:42px;font-size:13px}
+.staff-header{gap:12px}
+.staff-patient-panel{margin:18px 0 24px;padding:20px 22px;border:1px solid #d5e2ea;background:#f4f8fa;border-radius:12px}
+.staff-patient-panel .field{margin-bottom:14px;font-size:14px}
+.staff-patient-panel select{font-size:16px;min-height:48px;background:#fff}
+.staff-patient-header h2{font-size:24px;letter-spacing:-.4px;margin:4px 0 6px}
+.staff-patient-header p{font-size:15px;color:#355466;margin:0 0 6px}
+.staff-create-patient{margin-top:16px;padding-top:16px;border-top:1px solid #d5e2ea}
+.staff-create-patient h3{font-size:18px;margin:0 0 8px}
+.staff-create-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.staff-import-workspace{margin:8px 0 28px;padding:8px 0 0;border-top:1px solid var(--border)}
+.staff-import-workspace>h2{font-size:20px;margin:18px 0 6px}
+.staff-import-workspace>p{font-size:14px;color:#607a89;margin:0 0 8px}
+.staff-import-workspace .note-import-panel{padding:8px 0 0;border:0}
+.staff-medications{margin-top:18px}
+.staff-medications>h2{font-size:18px;margin:0 0 12px;padding:0 4px}
+.staff-medications>h2 span{font-size:14px;color:#708793;margin-left:6px}

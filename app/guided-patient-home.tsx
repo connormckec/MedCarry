@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Camera, Check, ChevronRight, LoaderCircle, Pill, ShieldCheck, Upload, WalletCards } from "lucide-react";
+import { Camera, Check, ChevronRight, FileText, LoaderCircle, Pill, ShieldCheck, WalletCards } from "lucide-react";
 import { isConfirmed, type Medication, type MedicationFields } from "@/lib/medication";
 import { PATIENT_SEND_CTA, PATIENT_SEND_INTRO, patientReceiptCopy } from "@/lib/clinic-submission";
 import "./patient/patient.css";
@@ -15,41 +15,55 @@ type Props={
   cleanupPair?:CleanupPair;
   onDuplicateRespond?:(id:string,response:"take_both"|"added_twice"|"unsure")=>void;
   onCleanupDismiss?:()=>void;
-  onCamera:()=>void;onUpload:()=>void;onManual:()=>void;onReview:(m:Medication,opts?:{cleanup?:boolean})=>void;onResumeDraft:(d:ResumeDraft)=>void;
+  onPhoto:()=>void;onUpload:()=>void;onManual:()=>void;
+  onReview:(m:Medication,opts?:{cleanup?:boolean})=>void;
+  onRemove:(m:Medication,reason:"added_by_mistake"|"no_longer_take")=>void;
+  onResumeDraft:(d:ResumeDraft)=>void;
   onSendToClinic:(opts:{emptyListAttested:boolean})=>void;onViewReceipt:()=>void;onChangeList:()=>void;
 };
 export default function GuidedPatientHome(p:Props){
   const [adding,setAdding]=useState(false);
-  /** After every medicine is checked, ask about missing items before the send step. */
   const [readyToSend,setReadyToSend]=useState(false);
+  const [removeId,setRemoveId]=useState<string|null>(null);
   const pending=p.medications.filter(m=>!isConfirmed(m));
   const next=pending[0];
   const openDupes=(p.duplicateFlags||[]).filter(f=>f.status==="open");
   const finished=!!p.clinicReceipt;
   const receipt=p.clinicReceipt?patientReceiptCopy(p.clinicReceipt.deliveryStatus,p.clinicReceipt.receivingClinic):null;
-  useEffect(()=>{setAdding(false);},[p.medications]);
+  useEffect(()=>{setAdding(false);setRemoveId(null);},[p.medications]);
   useEffect(()=>{if(pending.length>0)setReadyToSend(false);},[pending.length]);
   const capture=!finished&&(!p.medications.length||adding);
   const askMissing=!finished&&!capture&&pending.length===0&&p.medications.length>0&&!readyToSend;
   const sendStep=!finished&&!capture&&pending.length===0&&p.medications.length>0&&readyToSend;
   function medLabel(id:string){const m=p.medications.find(x=>x.id===id);return m?`${m.productName||"Medication"}${m.strength?` ${m.strength}`:""}`:"Medication";}
   function medById(id:string){return p.medications.find(x=>x.id===id);}
-  const listDetails=p.medications.length>0&&!capture&&<details className="patient-list"><summary>View all medications ({p.medications.length})</summary>
+  const listDetails=p.medications.length>0&&!capture&&<div className="patient-med-list">
+    <h2>Your medicines ({p.medications.length})</h2>
     {p.medications.map(m=>{
       const similar=openDupes.find(f=>f.medicationAId===m.id||f.medicationBId===m.id);
       const otherId=similar?(similar.medicationAId===m.id?similar.medicationBId:similar.medicationAId):"";
-      return <button key={m.id} type="button" className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}>
-        <span className="patient-med-icon"><Pill size={24}/></span>
-        <span>
-          <strong>{m.productName||"Medication to finish"}</strong>
-          <span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span>
-          <b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":m.status==="stopped"?"Checked · no longer take":"Checked"):"Needs checking"}</b>
-          {similar&&<em className="patient-similar">Looks similar to {medLabel(otherId)}</em>}
-        </span>
-        <span className="patient-med-edit">Edit<ChevronRight size={21}/></span>
-      </button>;
+      const removing=removeId===m.id;
+      return <div className="patient-med-row" key={m.id}>
+        <button type="button" className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}>
+          <span className="patient-med-icon"><Pill size={24}/></span>
+          <span>
+            <strong>{m.productName||"Medication to finish"}</strong>
+            <span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span>
+            <b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":m.status==="stopped"?"Checked · no longer take":"Checked"):"Needs checking"}</b>
+            {similar&&<em className="patient-similar">Looks similar to {medLabel(otherId)}</em>}
+          </span>
+          <span className="patient-med-edit">Edit<ChevronRight size={21}/></span>
+        </button>
+        {!removing?<button type="button" className="patient-remove" disabled={p.processing} onClick={()=>setRemoveId(m.id)}>Remove</button>
+        :<div className="patient-remove-reasons" role="group" aria-label={`Why remove ${m.productName||"this medicine"}?`}>
+          <p>Why remove it?</p>
+          <button type="button" className="patient-secondary" disabled={p.processing} onClick={()=>p.onRemove(m,"added_by_mistake")}>Added by mistake</button>
+          <button type="button" className="patient-secondary" disabled={p.processing} onClick={()=>p.onRemove(m,"no_longer_take")}>I no longer take it</button>
+          <button type="button" className="patient-text" disabled={p.processing} onClick={()=>setRemoveId(null)}>Cancel</button>
+        </div>}
+      </div>;
     })}
-  </details>;
+  </div>;
   return <main className="patient-home">
     <header className="patient-brand"><span className="brand-icon"><WalletCards size={22}/></span><strong>MedCarry</strong><ShieldCheck size={22}/></header>
     <div className="patient-testing">Test version · Demo records only</div>
@@ -89,14 +103,13 @@ export default function GuidedPatientHome(p:Props){
         </div>}
         {capture?<>
           <h1>Add a medicine.</h1>
-          <p className="patient-intro">Photograph the name and directions. Include vitamins and supplements too.</p>
-          <div className="patient-capture">
-            <button className="patient-primary" disabled={p.processing} onClick={p.onCamera}><Camera size={24}/>Take a picture</button>
-            <details className="patient-alternatives"><summary>Other ways to add it</summary><button className="patient-secondary" disabled={p.processing} onClick={p.onUpload}><Upload size={21}/>Choose a picture</button><button className="patient-secondary" disabled={p.processing} onClick={p.onManual}>Type it in</button></details>
+          <p className="patient-intro">Choose one way.</p>
+          <div className="patient-capture patient-add-choices">
+            <button className="patient-primary" disabled={p.processing} onClick={p.onPhoto}><Camera size={24}/>Take or upload a picture</button>
+            <button className="patient-secondary" disabled={p.processing} onClick={p.onManual}><FileText size={21}/>Type it in</button>
             {p.medications.length>0&&<button className="patient-text" onClick={()=>setAdding(false)}>Back to my list</button>}
             {!p.medications.length&&<button className="patient-text" disabled={p.processing} onClick={()=>p.onSendToClinic({emptyListAttested:true})}>I take no medications or supplements</button>}
           </div>
-          {p.medications.length>0&&<details className="patient-list"><summary>View my medications ({p.medications.length})</summary>{p.medications.map(m=><button key={m.id} className="patient-med" disabled={p.processing} onClick={()=>p.onReview(m)}><span className="patient-med-icon"><Pill size={24}/></span><span><strong>{m.productName||"Medication to finish"}</strong><span>{m.strengthUnknown?"Strength unsure":m.strength||"Check strength"}</span><b>{isConfirmed(m)?(m.actualUseUnknown||m.strengthUnknown||m.status==="unsure"?"Checked · some details unsure":"Checked"):"Needs checking"}</b></span><ChevronRight size={21}/></button>)}</details>}
         </>
         :askMissing?<>
           <div className="patient-success"><Check size={34}/></div>
